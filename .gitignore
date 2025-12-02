@@ -1,0 +1,49 @@
+# Go 编译产物
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go 工作区文件
+go.work
+go.work.sum
+
+# 依赖目录
+vendor/
+
+# 测试覆盖率
+*.coverprofile
+coverage.out
+coverage.html
+
+# IDE 和编辑器
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# 本地配置（不要提交真实配置）
+config.yml
+config.yaml
+*.local.yml
+*.local.yaml
+
+# 日志文件
+*.log
+logs/
+
+# 临时文件
+tmp/
+temp/
+*.tmp
+
+# 构建输出
+bin/
+dist/
+build/
+
