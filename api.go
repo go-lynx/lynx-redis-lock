@@ -6,8 +6,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/go-lynx/lynx/log"
 	redisplug "github.com/go-lynx/lynx-redis"
+	"github.com/go-lynx/lynx/log"
 )
 
 // Lock acquires a distributed lock for the specified key and executes the callback function, automatically releasing the lock after execution.
