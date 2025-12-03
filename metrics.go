@@ -4,7 +4,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/go-lynx/lynx/app/log"
+	"github.com/go-lynx/lynx/log"
 	"github.com/prometheus/client_golang/prometheus"
 )
 

@@ -6,8 +6,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/go-lynx/lynx/app/log"
-	lynx "github.com/go-lynx/lynx/plugins/nosql/redis"
+	"github.com/go-lynx/lynx/log"
+	redisplug "github.com/go-lynx/lynx-redis"
 )
 
 // Lock acquires a distributed lock for the specified key and executes the callback function, automatically releasing the lock after execution.
@@ -84,7 +84,7 @@ func UnlockByValue(ctx context.Context, key, value string) error {
 		return newLockError(ErrCodeInvalidOptions, "invalid lock key", err)
 	}
 	// Get Redis client
-	client := lynx.GetRedis()
+	client := redisplug.GetRedis()
 	if client == nil {
 		return ErrRedisClientNotFound
 	}
@@ -138,7 +138,7 @@ func NewLock(ctx context.Context, key string, options LockOptions) (*RedisLock, 
 		return nil, newLockError(ErrCodeInvalidOptions, "invalid lock options", err)
 	}
 	// Get Redis client
-	client := lynx.GetRedis()
+	client := redisplug.GetRedis()
 	if client == nil {
 		return nil, ErrRedisClientNotFound
 	}
@@ -194,7 +194,7 @@ func LockWithOptions(ctx context.Context, key string, options LockOptions, fn fu
 		return newLockError(ErrCodeInvalidOptions, "invalid lock options", err)
 	}
 	// Get Redis client
-	client := lynx.GetRedis()
+	client := redisplug.GetRedis()
 	if client == nil {
 		return ErrRedisClientNotFound
 	}

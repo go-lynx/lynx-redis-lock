@@ -10,7 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/go-lynx/lynx/app/log"
+	"github.com/go-lynx/lynx/log"
 )
 
 // Process-level lock identifier prefix, generated at process startup
