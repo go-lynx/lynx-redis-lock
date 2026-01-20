@@ -6,7 +6,7 @@ toolchain go1.25.3
 
 require (
 	github.com/go-lynx/lynx v1.5.2
-	github.com/go-lynx/lynx-redis v1.5.0
+	github.com/go-lynx/lynx-redis v1.5.2
 	github.com/prometheus/client_golang v1.23.0
 	github.com/redis/go-redis/v9 v9.12.1
 )
