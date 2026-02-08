@@ -33,8 +33,8 @@ func (rl *RedisLock) GetAcquiredAt() time.Time {
 }
 
 // GetToken returns the most recently acquired fencing token (generated on non-reentrant acquisition).
-// If 0, it means the lock has not been successfully acquired for the first time in this process
-// (or only reentry occurred).
+// If 0, the lock has not been acquired for the first time in this process (or only reentry occurred).
+// Fencing semantics: the resource layer must reject requests with an older token. See LIMITATIONS.md.
 func (rl *RedisLock) GetToken() int64 {
 	rl.mutex.Lock()
 	defer rl.mutex.Unlock()

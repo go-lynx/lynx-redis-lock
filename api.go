@@ -83,8 +83,8 @@ func UnlockByValue(ctx context.Context, key, value string) error {
 	if err := ValidateKey(key); err != nil {
 		return newLockError(ErrCodeInvalidOptions, "invalid lock key", err)
 	}
-	// Get Redis client
-	client := redisplug.GetRedis()
+	// Get Redis client (UniversalClient for standalone/cluster/sentinel)
+	client := redisplug.GetUniversalRedis()
 	if client == nil {
 		return ErrRedisClientNotFound
 	}
@@ -137,8 +137,8 @@ func NewLock(ctx context.Context, key string, options LockOptions) (*RedisLock, 
 	if err := options.Validate(); err != nil {
 		return nil, newLockError(ErrCodeInvalidOptions, "invalid lock options", err)
 	}
-	// Get Redis client
-	client := redisplug.GetRedis()
+	// Get Redis client (UniversalClient for standalone/cluster/sentinel)
+	client := redisplug.GetUniversalRedis()
 	if client == nil {
 		return nil, ErrRedisClientNotFound
 	}
@@ -193,8 +193,8 @@ func LockWithOptions(ctx context.Context, key string, options LockOptions, fn fu
 	if err := options.Validate(); err != nil {
 		return newLockError(ErrCodeInvalidOptions, "invalid lock options", err)
 	}
-	// Get Redis client
-	client := redisplug.GetRedis()
+	// Get Redis client (UniversalClient for standalone/cluster/sentinel)
+	client := redisplug.GetUniversalRedis()
 	if client == nil {
 		return ErrRedisClientNotFound
 	}

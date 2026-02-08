@@ -1,6 +1,8 @@
 # Redis Distributed Lock Plugin for Lynx Framework
 
-The Redis Distributed Lock Plugin provides a robust, high-performance distributed locking mechanism for the Lynx framework using Redis as the coordination backend. It supports advanced features like automatic renewal, retry mechanisms, and comprehensive monitoring.
+The Redis Distributed Lock Plugin provides a robust, high-performance distributed locking mechanism for the Lynx framework using Redis as the coordination backend. It supports automatic renewal, retry mechanisms, reentrancy (same instance), and works with **standalone, Cluster, and Sentinel** via `redis.UniversalClient`.
+
+**Design and limitations:** See [LIMITATIONS.md](./LIMITATIONS.md) for single-node vs Redlock, process pause/TTL, fencing token usage, renewal failure behavior, and shutdown/script timeout.
 
 ## Features
 
@@ -8,11 +10,10 @@ The Redis Distributed Lock Plugin provides a robust, high-performance distribute
 - **Distributed Locking**: Redis-based distributed lock implementation
 - **Automatic Renewal**: Configurable automatic lock renewal to prevent expiration
 - **Retry Mechanisms**: Intelligent retry logic with exponential backoff
-- **Deadlock Prevention**: Built-in deadlock detection and prevention
 - **Lock Timeout**: Configurable lock expiration and timeout handling
 
 ### Advanced Features
-- **Reentrant Locks**: Support for reentrant locking patterns
+- **Reentrant Locks**: Reentrancy by reusing the same `*RedisLock` instance (multiple `Acquire`/`Release` on one instance)
 - **Lock Monitoring**: Real-time lock status monitoring and statistics
 - **Graceful Shutdown**: Proper cleanup and resource management
 - **Performance Optimization**: High-performance lock operations with minimal overhead
@@ -123,18 +124,19 @@ package main
 
 import (
     "context"
+    "fmt"
+    "log"
     "time"
-    "github.com/go-lynx/lynx/plugins/nosql/redis/redislock"
+    "github.com/go-lynx/lynx-redis-lock"
 )
 
 func main() {
-    // Basic lock usage
-err := redislock.Lock(context.Background(), "my-lock", 30*time.Second, func() error {
+    err := redislock.Lock(context.Background(), "my-lock", 30*time.Second, func() error {
         // Critical section - your business logic here
         fmt.Println("Executing critical section")
         time.Sleep(5 * time.Second)
-    return nil
-})
+        return nil
+    })
 
     if err != nil {
         log.Printf("Failed to acquire lock: %v", err)
@@ -148,11 +150,9 @@ err := redislock.Lock(context.Background(), "my-lock", 30*time.Second, func() er
 // Configure lock options
 options := redislock.LockOptions{
     Expiration:       60 * time.Second,
-    RetryStrategy:    redislock.DefaultRetryStrategy,
+    RetryStrategy:    redislock.RetryStrategy{MaxRetries: 3, RetryDelay: 100 * time.Millisecond},
     RenewalEnabled:   true,
     RenewalThreshold: 0.5,
-    MaxRetries:       3,
-    RetryInterval:    100 * time.Millisecond,
 }
 
 err := redislock.LockWithOptions(context.Background(), "my-lock", options, func() error {
@@ -166,94 +166,97 @@ err := redislock.LockWithOptions(context.Background(), "my-lock", options, func(
 ### Manual Lock Management
 
 ```go
-// Acquire lock manually
-lock, err := redislock.Acquire(context.Background(), "my-lock", 30*time.Second)
+// Create a reusable lock instance and acquire it (works with standalone/Cluster/Sentinel via GetUniversalRedis)
+options := redislock.LockOptions{Expiration: 30 * time.Second}
+lock, err := redislock.NewLock(ctx, "my-lock", options)
 if err != nil {
-    log.Printf("Failed to acquire lock: %v", err)
-    return
+    return err
 }
-defer lock.Release()
+if err := lock.Acquire(ctx); err != nil {
+    return err
+}
+defer lock.Release(ctx)
 
-// Check lock status
-if lock.IsHeld() {
+// Check if current instance holds the lock
+held, err := lock.IsLocked(ctx)
+if err == nil && held {
     fmt.Println("Lock is held")
 }
 
-// Manual renewal
-err = lock.Renew(context.Background(), 30*time.Second)
-if err != nil {
-    log.Printf("Failed to renew lock: %v", err)
-}
-
-// Release lock manually
-err = lock.Release()
-if err != nil {
-    log.Printf("Failed to release lock: %v", err)
-}
+// Optional: manual renewal
+_ = lock.Renew(ctx, 30*time.Second)
 ```
 
 ### Reentrant Locks
 
+Reentrancy is **per lock instance**: use one `*RedisLock` and call `Acquire` multiple times (and the same number of `Release`). Each new `Lock()` or `NewLock()` creates a different instance and different holder identity, so they do **not** reenter.
+
 ```go
-// Reentrant lock usage
-err := redislock.LockReentrant(context.Background(), "my-lock", 30*time.Second, func() error {
-    // First level
-    return redislock.LockReentrant(context.Background(), "my-lock", 30*time.Second, func() error {
-        // Second level - same lock can be acquired again
-        fmt.Println("Nested critical section")
-        return nil
-    })
-})
+options := redislock.LockOptions{Expiration: 30 * time.Second}
+lock, _ := redislock.NewLock(ctx, "my-lock", options)
+_ = lock.Acquire(ctx)
+defer lock.Release(ctx)
+// Reenter with the same instance
+_ = lock.Acquire(ctx)
+defer lock.Release(ctx)
+// Critical section
 ```
+
+Or use `LockWithToken` and inside the callback use the same `lock` for nested work if you need the fencing token in the callback.
 
 ## API Reference
 
 ### Core Functions
 
-- `Lock(ctx, key, timeout, fn) error` - Acquire lock and execute function
-- `LockWithOptions(ctx, key, options, fn) error` - Acquire lock with custom options
-- `LockReentrant(ctx, key, timeout, fn) error` - Acquire reentrant lock
-- `Acquire(ctx, key, timeout) (*RedisLock, error)` - Acquire lock manually
-- `TryLock(ctx, key, timeout) (*RedisLock, error)` - Try to acquire lock without blocking
+- `Lock(ctx, key, expiration, fn) error` - Acquire lock and execute function (uses default options).
+- `LockWithOptions(ctx, key, options, fn) error` - Acquire lock with full options.
+- `LockWithRetry(ctx, key, expiration, fn, strategy) error` - Acquire with custom retry strategy.
+- `LockWithToken(ctx, key, expiration, fn func(token int64) error) error` - Acquire and run callback with fencing token (see LIMITATIONS.md).
+- `NewLock(ctx, key, options) (*RedisLock, error)` - Create a reusable lock instance (then call `Acquire`/`Release`); reentrancy is per instance.
+- `UnlockByValue(ctx, key, value) error` - Release by key and value (e.g. from another process that stored the value).
 
 ### Lock Instance Methods
 
-- `IsHeld() bool` - Check if lock is currently held
-- `Renew(ctx, timeout) error` - Renew lock expiration
-- `Release() error` - Release the lock
-- `GetKey() string` - Get lock key
-- `GetValue() string` - Get lock value
-- `GetExpiration() time.Duration` - Get remaining expiration time
+- `Acquire(ctx) error` - Acquire or reenter (same instance).
+- `AcquireWithRetry(ctx, strategy) error` - Acquire with retries.
+- `Release(ctx) error` - Release (or partial release when reentrant).
+- `Renew(ctx, newExpiration) error` - Manually extend TTL.
+- `IsLocked(ctx) (bool, error)` - Whether the current instance holds the lock.
+- `GetKey() string`, `GetExpiration() time.Duration`, `GetExpiresAt() time.Time`, `GetToken() int64` - Status accessors.
 
 ### Configuration Options
 
 ```go
 type LockOptions struct {
     Expiration       time.Duration
-    RetryStrategy    RetryStrategy
-    RenewalEnabled   bool
-    RenewalThreshold float64
-    MaxRetries       int
-    RetryInterval    time.Duration
+    RetryStrategy     RetryStrategy  // MaxRetries, RetryDelay
+    RenewalEnabled     bool
+    RenewalThreshold   float64
+    WorkerPoolSize     int
+    RenewalConfig      RenewalConfig
+    ScriptCallTimeout  time.Duration
 }
 ```
 
 ## Monitoring and Metrics
 
-### Health Checks
+### Statistics
 
 ```go
-// Check lock system health
-err := redislock.CheckHealth()
-if err != nil {
-    log.Printf("Lock system health check failed: %v", err)
-}
-
-// Get lock statistics
-stats := redislock.GetStatistics()
-log.Printf("Active locks: %d, Total acquired: %d, Total released: %d",
-    stats.ActiveLocks, stats.TotalAcquired, stats.TotalReleased)
+stats := redislock.GetStats()
+// total_locks, active_locks, renewal_count, renewal_errors, skipped_renewals, etc.
+log.Printf("Active locks: %d, Renewal count: %d", stats["active_locks"], stats["renewal_count"])
 ```
+
+### Graceful shutdown
+
+```go
+// Stop renewal service and wait for active locks to drop to zero (or timeout)
+if err := redislock.Shutdown(ctx); err != nil {
+    log.Printf("Shutdown: %v", err)
+}
+```
+See [LIMITATIONS.md](./LIMITATIONS.md) for shutdown semantics (no forced release in Redis).
 
 ### Prometheus Metrics
 
@@ -382,8 +385,9 @@ lynx:
 
 ## Dependencies
 
-- `github.com/go-redis/redis/v9` - Redis client library
+- `github.com/redis/go-redis/v9` - Redis client (lock uses `UniversalClient` for standalone/cluster/sentinel)
 - `github.com/go-lynx/lynx` - Lynx framework core
+- `github.com/go-lynx/lynx-redis` - Redis plugin (provides `GetUniversalRedis()`)
 - `github.com/prometheus/client_golang` - Prometheus metrics
 
 ## License

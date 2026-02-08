@@ -109,16 +109,17 @@ func (NoOpCallback) OnLockRenewed(key string, duration time.Duration)  {}
 func (NoOpCallback) OnLockRenewalFailed(key string, error error)       {}
 func (NoOpCallback) OnLockAcquireFailed(key string, error error)       {}
 
-// RedisLock implements Redis-based distributed lock
+// RedisLock implements Redis-based distributed lock.
+// client is UniversalClient so that the lock works with standalone, Cluster, and Sentinel.
 type RedisLock struct {
-	client           *redis.Client // Redis client
-	key              string        // Lock key name
-	value            string        // Lock value (used to identify holder)
-	expiration       time.Duration // Lock expiration time
-	expiresAt        time.Time     // Lock expiration time point
-	mutex            sync.Mutex    // Protect internal state
-	renewalThreshold float64       // Renewal threshold
-	acquiredAt       time.Time     // Time when lock was acquired
+	client           redis.UniversalClient // Redis client (standalone/cluster/sentinel)
+	key              string                // Lock key name
+	value            string                // Lock value (used to identify holder)
+	expiration       time.Duration         // Lock expiration time
+	expiresAt        time.Time             // Lock expiration time point
+	mutex            sync.Mutex            // Protect internal state
+	renewalThreshold float64               // Renewal threshold
+	acquiredAt       time.Time             // Time when lock was acquired
 
 	// Two keys actually used in Redis (using same hash tag to ensure same slot in cluster)
 	ownerKey string // Key storing holder identifier

@@ -165,7 +165,9 @@ func (lm *lockManager) renewLockWithRetry(lock *RedisLock, options LockOptions) 
 		}
 	}
 
-	// Retry failed: remove lock from manager and decrease active count to avoid invalid renewal
+	// Retry failed: remove lock from manager and stop renewing this lock.
+	// We do NOT run the unlock script here; the key in Redis will expire naturally after remaining TTL.
+	// See LIMITATIONS.md "Behavior after renewal failure" for semantics and recommendations.
 	lm.mutex.Lock()
 	delete(lm.locks, lock.key)
 	atomic.AddInt64(&lm.stats.ActiveLocks, -1)
