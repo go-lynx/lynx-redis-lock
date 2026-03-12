@@ -260,24 +260,16 @@ See [LIMITATIONS.md](./LIMITATIONS.md) for shutdown semantics (no forced release
 
 ### Prometheus Metrics
 
-The plugin exposes comprehensive Prometheus metrics:
+Register with `redislock.InitMetrics(reg)`. Exposed metrics (namespace `lynx`, subsystem `redis_lock`):
 
-#### Lock Metrics
-- `lynx_redis_lock_acquisitions_total` - Total lock acquisitions
-- `lynx_redis_lock_releases_total` - Total lock releases
-- `lynx_redis_lock_errors_total` - Total lock errors
-- `lynx_redis_lock_duration_seconds` - Lock hold duration
-- `lynx_redis_lock_active` - Currently active locks
-
-#### Retry Metrics
-- `lynx_redis_lock_retries_total` - Total retry attempts
-- `lynx_redis_lock_retry_duration_seconds` - Retry duration
-- `lynx_redis_lock_retry_failures_total` - Retry failures
-
-#### Renewal Metrics
-- `lynx_redis_lock_renewals_total` - Total lock renewals
-- `lynx_redis_lock_renewal_errors_total` - Renewal errors
-- `lynx_redis_lock_expirations_total` - Lock expirations
+| Metric | Type | Labels / Description |
+|--------|------|----------------------|
+| `lynx_redis_lock_acquire_total` | Counter | `result` (success, conflict, error) |
+| `lynx_redis_lock_unlock_total` | Counter | `result` (full, partial, not_held, error) |
+| `lynx_redis_lock_renew_total` | Counter | `result` (success, not_owner, not_exist, fail, error) |
+| `lynx_redis_lock_skipped_renewals_total` | Counter | Renew tasks skipped (worker pool full) |
+| `lynx_redis_lock_active_locks` | Gauge | Current locks in the renewal manager |
+| `lynx_redis_lock_script_latency_seconds` | Histogram | `op` (acquire, unlock, renew) |
 
 ## Performance Tuning
 

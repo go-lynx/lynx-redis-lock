@@ -10,7 +10,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// LockOptions lock configuration options
+// LockOptions configures lock behavior: expiration, retry, renewal, and script timeouts.
 type LockOptions struct {
 	Expiration       time.Duration // Lock expiration time
 	RetryStrategy    RetryStrategy // Retry strategy
@@ -22,7 +22,7 @@ type LockOptions struct {
 	ScriptCallTimeout time.Duration
 }
 
-// Validate validates configuration options
+// Validate validates the lock options (expiration, renewal threshold, worker pool size, retry strategy).
 func (lo *LockOptions) Validate() error {
 	if lo.Expiration <= 0 {
 		return fmt.Errorf("expiration must be positive, got %v", lo.Expiration)
@@ -39,14 +39,17 @@ func (lo *LockOptions) Validate() error {
 	return lo.RetryStrategy.Validate()
 }
 
-// ValidateKey validates the validity of lock key name
+// MaxLockKeyLength is the maximum allowed length for a lock key (business key, not the internal Redis key).
+const MaxLockKeyLength = 255
+
+// ValidateKey validates the lock key: non-empty, length <= MaxLockKeyLength, printable ASCII, no '{' or '}'.
 func ValidateKey(key string) error {
 	if key == "" {
 		return fmt.Errorf("lock key cannot be empty")
 	}
 
-	if len(key) > 255 {
-		return fmt.Errorf("lock key too long, max length is 255, got %d", len(key))
+	if len(key) > MaxLockKeyLength {
+		return fmt.Errorf("lock key too long, max length is %d, got %d", MaxLockKeyLength, len(key))
 	}
 
 	// Check for invalid characters
@@ -62,7 +65,7 @@ func ValidateKey(key string) error {
 	return nil
 }
 
-// Validate validates retry strategy
+// Validate validates the retry strategy (MaxRetries and RetryDelay non-negative).
 func (rs *RetryStrategy) Validate() error {
 	if rs.MaxRetries < 0 {
 		return fmt.Errorf("max retries must be non-negative, got %d", rs.MaxRetries)

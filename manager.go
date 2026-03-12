@@ -30,7 +30,7 @@ func SetCallback(callback LockCallback) {
 	globalCallback = callback
 }
 
-// startRenewalService starts the renewal service (improved version)
+// startRenewalService starts the global renewal goroutine and worker pool (idempotent; only one goroutine runs).
 func (lm *lockManager) startRenewalService(options LockOptions) {
 	lm.mutex.Lock()
 	if lm.running {
@@ -80,7 +80,11 @@ func (lm *lockManager) stopRenewalService() {
 	// Do not close workerPool to avoid panic when other goroutines send to it.
 }
 
-// processRenewals processes lock renewals (using worker pool pattern)
+// processRenewals processes lock renewals (using worker pool pattern).
+// Renewal is only attempted when remaining TTL is within the threshold (e.g. default 30%:
+// for a 30s lock, first renewal runs when ~9s or less remains). Note: when debugging
+// with breakpoints the entire process is suspended, so the renewal goroutine does not
+// run and Redis TTL continues to expire; use time.Sleep + logging to verify renewal in tests.
 func (lm *lockManager) processRenewals(options LockOptions) {
 	lm.mutex.RLock()
 

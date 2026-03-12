@@ -10,25 +10,27 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// GetKey gets the lock key name
+// GetKey returns the business lock key (as passed to NewLock / Lock).
 func (rl *RedisLock) GetKey() string {
 	return rl.key
 }
 
-// GetExpiration gets the lock expiration time
+// GetExpiration returns the configured lock TTL.
 func (rl *RedisLock) GetExpiration() time.Duration {
 	return rl.expiration
 }
 
-// GetExpiresAt gets the lock expiration time point
+// GetExpiresAt returns the absolute expiration time (guarded by mutex).
 func (rl *RedisLock) GetExpiresAt() time.Time {
 	rl.mutex.Lock()
 	defer rl.mutex.Unlock()
 	return rl.expiresAt
 }
 
-// GetAcquiredAt gets the lock acquisition time
+// GetAcquiredAt returns when the lock was acquired (guarded by mutex for consistency with renewal).
 func (rl *RedisLock) GetAcquiredAt() time.Time {
+	rl.mutex.Lock()
+	defer rl.mutex.Unlock()
 	return rl.acquiredAt
 }
 
@@ -41,14 +43,14 @@ func (rl *RedisLock) GetToken() int64 {
 	return rl.token
 }
 
-// GetRemainingTime gets the remaining time of the lock
+// GetRemainingTime returns the remaining TTL until expiry (guarded by mutex).
 func (rl *RedisLock) GetRemainingTime() time.Duration {
 	rl.mutex.Lock()
 	defer rl.mutex.Unlock()
 	return time.Until(rl.expiresAt)
 }
 
-// GetStatus gets the current status information of the lock (avoids repeated time calculations)
+// GetStatus returns remaining TTL and whether the lock is already expired (single snapshot under mutex).
 func (rl *RedisLock) GetStatus() (remainingTime time.Duration, isExpired bool) {
 	rl.mutex.Lock()
 	defer rl.mutex.Unlock()
@@ -58,14 +60,14 @@ func (rl *RedisLock) GetStatus() (remainingTime time.Duration, isExpired bool) {
 	return
 }
 
-// IsExpired checks if the lock has expired
+// IsExpired reports whether the lock’s local expiry time has passed (guarded by mutex).
 func (rl *RedisLock) IsExpired() bool {
 	rl.mutex.Lock()
 	defer rl.mutex.Unlock()
 	return time.Now().After(rl.expiresAt)
 }
 
-// Renew manually renews the lock
+// Renew extends the lock TTL in Redis to newExpiration; caller must hold the lock.
 func (rl *RedisLock) Renew(ctx context.Context, newExpiration time.Duration) error {
 	// Set optional timeout for single call
 	runCtx := ctx
@@ -111,7 +113,7 @@ func (rl *RedisLock) Renew(ctx context.Context, newExpiration time.Duration) err
 	}
 }
 
-// Release releases the lock
+// Release releases the lock (or one reentry count); returns ErrLockNotHeld if not owner or already released.
 func (rl *RedisLock) Release(ctx context.Context) error {
 	// Set optional timeout for single call
 	runCtx := ctx
@@ -151,7 +153,7 @@ func (rl *RedisLock) Release(ctx context.Context) error {
 	}
 }
 
-// IsLocked checks if the lock is held by the current instance
+// IsLocked returns whether the current instance holds the lock in Redis (by value match).
 func (rl *RedisLock) IsLocked(ctx context.Context) (bool, error) {
 	// Set optional timeout for single call
 	runCtx := ctx

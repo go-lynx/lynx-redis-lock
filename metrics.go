@@ -122,7 +122,7 @@ func InitMetrics(reg prometheus.Registerer) {
 	}
 }
 
-// Helper functions used within the package to record metrics.
+// observeScriptLatency and inc* record metrics from lock/script calls; used only inside this package.
 func observeScriptLatency(op string, d time.Duration) {
 	scriptLatency.WithLabelValues(op).Observe(d.Seconds())
 }

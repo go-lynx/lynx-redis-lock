@@ -37,7 +37,7 @@ func (e *LockError) Unwrap() error {
 	return e.Err
 }
 
-// Helper function to create lock errors
+// newLockError constructs a LockError for internal use; exported errors use it with fixed code/message.
 func newLockError(code, message string, err error) *LockError {
 	return &LockError{
 		Code:    code,
@@ -69,7 +69,7 @@ var (
 	ErrInvalidOptions = newLockError(ErrCodeInvalidOptions, "invalid options", nil)
 )
 
-// Error message internationalization mapping (can be extended as needed)
+// Error message internationalization (extend as needed; "zh" values are placeholders until translated).
 var errorMessages = map[string]map[string]string{
 	"en": {
 		ErrCodeLockNotHeld:           "Lock is not held by current instance",

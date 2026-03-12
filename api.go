@@ -21,7 +21,7 @@ func Lock(ctx context.Context, key string, expiration time.Duration, fn func() e
 	return LockWithOptions(ctx, key, options, fn)
 }
 
-// LockWithToken acquires a distributed lock for the specified key and executes the callback function, callback can obtain fencing token.
+// LockWithToken acquires a distributed lock and runs fn; the callback receives a fencing token (see LIMITATIONS.md).
 // - Based on DefaultLockOptions, only overriding Expiration, retry strategy uses DefaultRetryStrategy.
 // - token is only incremented on "first acquisition" (non-reentrant); reentry does not generate a new token.
 func LockWithToken(ctx context.Context, key string, expiration time.Duration, fn func(token int64) error) error {
@@ -200,8 +200,9 @@ func LockWithOptions(ctx context.Context, key string, options LockOptions, fn fu
 	}
 	// Generate lock value
 	value := generateLockValue()
-	// Build lock keys
+	// Build lock keys (include tokenKey for consistency with NewLock; LockWithOptions does not use token)
 	ownerKey, countKey := buildLockKeys(key)
+	tokenKey := buildTokenKey(key)
 	// Create lock instance
 	lock := &RedisLock{
 		client:           client,
@@ -211,6 +212,7 @@ func LockWithOptions(ctx context.Context, key string, options LockOptions, fn fu
 		renewalThreshold: options.RenewalThreshold,
 		ownerKey:         ownerKey,
 		countKey:         countKey,
+		tokenKey:         tokenKey,
 	}
 	// Try to acquire lock
 	for retries := 0; ; retries++ {
@@ -257,14 +259,17 @@ func LockWithOptions(ctx context.Context, key string, options LockOptions, fn fu
 			return fmt.Errorf("unknown lock result type: %T", result)
 		}
 		if n > 0 {
-			// Use the same timestamp to avoid repeated time.Now() calls
+			// Use the same timestamp to avoid repeated time.Now() calls; protect with mutex to avoid data race with renewal goroutine
 			now := time.Now()
+			lock.mutex.Lock()
 			lock.expiresAt = now.Add(lock.expiration)
 			lock.acquiredAt = now
+			lock.mutex.Unlock()
 			incAcquire("success")
 			// Trigger lock acquired callback
 			globalCallback.OnLockAcquired(key, lock.expiration)
-			// If renewal is enabled, add to global lock manager
+			// If renewal is enabled, add to global lock manager (renewal runs in a background goroutine;
+			// when debugging with breakpoints the process is suspended so renewal will not run)
 			if options.RenewalEnabled {
 				globalLockManager.mutex.Lock()
 				globalLockManager.locks[key] = lock
@@ -317,7 +322,7 @@ func LockWithOptions(ctx context.Context, key string, options LockOptions, fn fu
 						ccancel()
 					}
 					if checkErr != nil {
-						// Conservative handling: if query fails, keep in manager to avoid lock losing renewal unexpectedly
+						// Conservative: if check fails, keep in manager so renewal is not lost
 						log.ErrorCtx(ctx, "failed to check lock held after release", "error", checkErr)
 						return
 					}
