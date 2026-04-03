@@ -21,10 +21,9 @@ The Redis Distributed Lock Plugin provides a robust, high-performance distribute
 
 ### Monitoring & Observability
 - **Prometheus Metrics**: Comprehensive monitoring and alerting
-- **Health Checks**: Real-time lock health monitoring
 - **Performance Analytics**: Lock acquisition and release performance metrics
 - **Error Tracking**: Detailed error categorization and reporting
-- **Statistics Collection**: Lock usage statistics and performance data
+- **Statistics Collection**: Renewal manager and lock usage statistics
 
 ## Architecture
 
@@ -55,64 +54,42 @@ The plugin follows the Lynx framework's layered architecture:
 
 ## Configuration
 
-### Basic Configuration
+### Runtime Prerequisites
+
+This module does **not** define a standalone `lynx.redis.lock` or `lynx.redis.lock.*` config section. It obtains the underlying Redis client from `github.com/go-lynx/lynx-redis` via `GetUniversalRedis()`, so configure topology, authentication, TLS, and pool settings in the Redis plugin first.
 
 ```yaml
 lynx:
   redis:
-    # Redis connection configuration
     addrs: ["localhost:6379"]
     password: ""
     db: 0
-    
-    # Lock configuration
-    lock:
-      default_timeout: 30s
-      default_retry_interval: 100ms
-      max_retries: 3
-      renewal_enabled: true
-      renewal_threshold: 0.5
-      renewal_interval: 10s
 ```
 
-### Advanced Configuration
+For Cluster or Sentinel examples, see [../lynx-redis/README.md](../lynx-redis/README.md) and [../lynx-redis/conf/example_config.yml](../lynx-redis/conf/example_config.yml).
 
-```yaml
-lynx:
-  redis:
-    addrs: ["redis1:6379", "redis2:6379", "redis3:6379"]
-    password: "your-redis-password"
-    db: 0
-    
-    # Connection pool configuration
-    pool:
-      max_active: 100
-      max_idle: 10
-      idle_timeout: 300s
-      max_conn_lifetime: 3600s
-    
-    # Lock configuration
-    lock:
-      default_timeout: 60s
-      default_retry_interval: 200ms
-      max_retries: 5
-      renewal_enabled: true
-      renewal_threshold: 0.3
-      renewal_interval: 5s
-      
-      # Retry strategy
-      retry_strategy:
-        type: "exponential_backoff"
-        initial_interval: 100ms
-        max_interval: 5s
-        multiplier: 2.0
-        max_elapsed_time: 30s
-      
-      # Monitoring
-      monitoring:
-        enable_metrics: true
-        metrics_path: "/metrics"
-        health_check_interval: 30s
+### Lock Behavior Configuration
+
+Lock expiration, retry, renewal, worker-pool size, and script timeouts are configured in code through `LockOptions`, not through YAML.
+
+```go
+options := redislock.DefaultLockOptions
+options.Expiration = 30 * time.Second
+options.RetryStrategy = redislock.RetryStrategy{
+    MaxRetries: 3,
+    RetryDelay: 100 * time.Millisecond,
+}
+options.RenewalEnabled = true
+options.RenewalThreshold = 0.3
+options.WorkerPoolSize = 50
+options.RenewalConfig = redislock.RenewalConfig{
+    MaxRetries:    4,
+    BaseDelay:     100 * time.Millisecond,
+    MaxDelay:      800 * time.Millisecond,
+    CheckInterval: 300 * time.Millisecond,
+    CallTimeout:   600 * time.Millisecond,
+}
+options.ScriptCallTimeout = 600 * time.Millisecond
 ```
 
 ## Usage
@@ -127,10 +104,11 @@ import (
     "fmt"
     "log"
     "time"
-    "github.com/go-lynx/lynx-redis-lock"
+    redislock "github.com/go-lynx/lynx-redis-lock"
 )
 
 func main() {
+    // Requires the lynx-redis plugin to be initialized first.
     err := redislock.Lock(context.Background(), "my-lock", 30*time.Second, func() error {
         // Critical section - your business logic here
         fmt.Println("Executing critical section")
@@ -271,46 +249,29 @@ Register with `redislock.InitMetrics(reg)`. Exposed metrics (namespace `lynx`, s
 | `lynx_redis_lock_active_locks` | Gauge | Current locks in the renewal manager |
 | `lynx_redis_lock_script_latency_seconds` | Histogram | `op` (acquire, unlock, renew) |
 
+## Validation
+
+Current automated baseline in this workspace is `go test ./... -> [no test files]`. See [VALIDATION.md](./VALIDATION.md) for the exact output and the recommended manual smoke checks.
+
 ## Performance Tuning
 
-### Lock Configuration
+### Lock Option Tuning
 
-```yaml
-lynx:
-  redis:
-    lock:
-      # Optimize for high concurrency
-      default_timeout: 10s
-      max_retries: 5
-      retry_interval: 50ms
-      
-      # Enable renewal for long operations
-      renewal_enabled: true
-      renewal_threshold: 0.3
-      renewal_interval: 3s
-      
-      # Retry strategy
-      retry_strategy:
-        type: "exponential_backoff"
-        initial_interval: 50ms
-        max_interval: 2s
-        multiplier: 1.5
+```go
+options := redislock.DefaultLockOptions
+options.Expiration = 10 * time.Second
+options.RetryStrategy = redislock.RetryStrategy{
+    MaxRetries: 5,
+    RetryDelay: 50 * time.Millisecond,
+}
+options.RenewalThreshold = 0.3
+options.WorkerPoolSize = 100
+options.RenewalConfig.CheckInterval = 200 * time.Millisecond
 ```
 
 ### Redis Configuration
 
-```yaml
-lynx:
-  redis:
-    # Use Redis cluster for high availability
-    addrs: ["redis1:6379", "redis2:6379", "redis3:6379"]
-    
-    # Optimize connection pool
-    pool:
-      max_active: 200
-      max_idle: 50
-      idle_timeout: 300s
-```
+Tune connection pool, retry, TLS, and Sentinel/Cluster topology in `lynx-redis`; this package reuses that `redis.UniversalClient` instead of owning a second configuration surface.
 
 ## Troubleshooting
 
@@ -338,16 +299,7 @@ lynx:
 
 ### Debug Mode
 
-Enable debug logging for detailed troubleshooting:
-
-```yaml
-lynx:
-  redis:
-    lock:
-      logging:
-        level: "DEBUG"
-        enable_metrics: true
-```
+There is no dedicated `lynx.redis.lock.logging` config block. For troubleshooting, use application-level logging, `redislock.GetStats()`, Prometheus collectors from `redislock.InitMetrics`, and `redislock.SetCallback(...)` if you need to observe acquire/release/renew events.
 
 ## Best Practices
 
@@ -361,13 +313,13 @@ lynx:
 - Optimize lock duration
 - Use connection pooling
 - Monitor lock statistics
-- Implement circuit breakers
+- Tune `WorkerPoolSize`, `ScriptCallTimeout`, and renewal intervals to match Redis latency
 
 ### Reliability
 - Handle lock failures gracefully
 - Implement retry logic
 - Use lock renewal for long operations
-- Monitor lock health
+- Monitor renewal errors and skipped renewals
 
 ### Security
 - Use secure Redis connections
