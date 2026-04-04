@@ -6,7 +6,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	redisplug "github.com/go-lynx/lynx-redis"
 	"github.com/go-lynx/lynx/log"
 )
 
@@ -84,9 +83,16 @@ func UnlockByValue(ctx context.Context, key, value string) error {
 		return newLockError(ErrCodeInvalidOptions, "invalid lock key", err)
 	}
 	// Get Redis client (UniversalClient for standalone/cluster/sentinel)
-	client := redisplug.GetUniversalRedis()
-	if client == nil {
-		return ErrRedisClientNotFound
+	provider, err := resolveRedisProvider()
+	if err != nil {
+		return err
+	}
+	client, err := provider.UniversalClient(ctx)
+	if err != nil || client == nil {
+		if err == nil {
+			err = ErrRedisClientNotFound
+		}
+		return fmt.Errorf("%w: %v", ErrRedisClientNotFound, err)
 	}
 	// Build lock keys
 	ownerKey, countKey := buildLockKeys(key)
@@ -138,9 +144,9 @@ func NewLock(ctx context.Context, key string, options LockOptions) (*RedisLock, 
 		return nil, newLockError(ErrCodeInvalidOptions, "invalid lock options", err)
 	}
 	// Get Redis client (UniversalClient for standalone/cluster/sentinel)
-	client := redisplug.GetUniversalRedis()
-	if client == nil {
-		return nil, ErrRedisClientNotFound
+	provider, err := resolveRedisProvider()
+	if err != nil {
+		return nil, err
 	}
 	// Build lock keys and fencing token key
 	ownerKey, countKey := buildLockKeys(key)
@@ -149,7 +155,7 @@ func NewLock(ctx context.Context, key string, options LockOptions) (*RedisLock, 
 	value := generateLockValue()
 	// Create lock instance
 	lock := &RedisLock{
-		client:           client,
+		provider:         provider,
 		key:              key,
 		value:            value,
 		expiration:       options.Expiration,
@@ -194,9 +200,9 @@ func LockWithOptions(ctx context.Context, key string, options LockOptions, fn fu
 		return newLockError(ErrCodeInvalidOptions, "invalid lock options", err)
 	}
 	// Get Redis client (UniversalClient for standalone/cluster/sentinel)
-	client := redisplug.GetUniversalRedis()
-	if client == nil {
-		return ErrRedisClientNotFound
+	provider, err := resolveRedisProvider()
+	if err != nil {
+		return err
 	}
 	// Generate lock value
 	value := generateLockValue()
@@ -205,7 +211,7 @@ func LockWithOptions(ctx context.Context, key string, options LockOptions, fn fu
 	tokenKey := buildTokenKey(key)
 	// Create lock instance
 	lock := &RedisLock{
-		client:           client,
+		provider:         provider,
 		key:              key,
 		value:            value,
 		expiration:       options.Expiration,
@@ -242,8 +248,15 @@ func LockWithOptions(ctx context.Context, key string, options LockOptions, fn fu
 		if to := options.ScriptCallTimeout; to > 0 {
 			runCtx, cancel = context.WithTimeout(ctx, to)
 		}
+		client, err := lock.currentClient(runCtx)
+		if err != nil {
+			if cancel != nil {
+				cancel()
+			}
+			return err
+		}
 		start := time.Now()
-		result, err := lockScript.Run(runCtx, lock.client, []string{lock.ownerKey, lock.countKey},
+		result, err := lockScript.Run(runCtx, client, []string{lock.ownerKey, lock.countKey},
 			lock.value, lock.expiration.Milliseconds()).Result()
 		if cancel != nil {
 			cancel()

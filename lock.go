@@ -10,6 +10,23 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+func (rl *RedisLock) currentClient(ctx context.Context) (redis.UniversalClient, error) {
+	if rl == nil {
+		return nil, fmt.Errorf("redis lock is nil")
+	}
+	if rl.provider == nil {
+		return nil, ErrRedisClientNotFound
+	}
+	client, err := rl.provider.UniversalClient(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrRedisClientNotFound, err)
+	}
+	if client == nil {
+		return nil, ErrRedisClientNotFound
+	}
+	return client, nil
+}
+
 // GetKey returns the business lock key (as passed to NewLock / Lock).
 func (rl *RedisLock) GetKey() string {
 	return rl.key
@@ -69,6 +86,11 @@ func (rl *RedisLock) IsExpired() bool {
 
 // Renew extends the lock TTL in Redis to newExpiration; caller must hold the lock.
 func (rl *RedisLock) Renew(ctx context.Context, newExpiration time.Duration) error {
+	client, err := rl.currentClient(ctx)
+	if err != nil {
+		globalCallback.OnLockRenewalFailed(rl.key, err)
+		return err
+	}
 	// Set optional timeout for single call
 	runCtx := ctx
 	var cancel context.CancelFunc
@@ -77,7 +99,7 @@ func (rl *RedisLock) Renew(ctx context.Context, newExpiration time.Duration) err
 	}
 	start := time.Now()
 	// Execute renewal script (avoid network calls while holding lock)
-	result, err := renewScript.Run(runCtx, rl.client, []string{rl.ownerKey, rl.countKey},
+	result, err := renewScript.Run(runCtx, client, []string{rl.ownerKey, rl.countKey},
 		rl.value, newExpiration.Milliseconds()).Result()
 	if cancel != nil {
 		cancel()
@@ -115,6 +137,10 @@ func (rl *RedisLock) Renew(ctx context.Context, newExpiration time.Duration) err
 
 // Release releases the lock (or one reentry count); returns ErrLockNotHeld if not owner or already released.
 func (rl *RedisLock) Release(ctx context.Context) error {
+	client, err := rl.currentClient(ctx)
+	if err != nil {
+		return err
+	}
 	// Set optional timeout for single call
 	runCtx := ctx
 	var cancel context.CancelFunc
@@ -123,7 +149,7 @@ func (rl *RedisLock) Release(ctx context.Context) error {
 	}
 	start := time.Now()
 	// Execute unlock script (unified semantics: partial release does not refresh TTL, pass 0)
-	result, err := unlockScript.Run(runCtx, rl.client, []string{rl.ownerKey, rl.countKey}, rl.value, int64(0)).Result()
+	result, err := unlockScript.Run(runCtx, client, []string{rl.ownerKey, rl.countKey}, rl.value, int64(0)).Result()
 	if cancel != nil {
 		cancel()
 	}
@@ -155,13 +181,17 @@ func (rl *RedisLock) Release(ctx context.Context) error {
 
 // IsLocked returns whether the current instance holds the lock in Redis (by value match).
 func (rl *RedisLock) IsLocked(ctx context.Context) (bool, error) {
+	client, err := rl.currentClient(ctx)
+	if err != nil {
+		return false, err
+	}
 	// Set optional timeout for single call
 	runCtx := ctx
 	var cancel context.CancelFunc
 	if to := DefaultLockOptions.ScriptCallTimeout; to > 0 {
 		runCtx, cancel = context.WithTimeout(ctx, to)
 	}
-	value, err := rl.client.Get(runCtx, rl.ownerKey).Result()
+	value, err := client.Get(runCtx, rl.ownerKey).Result()
 	if cancel != nil {
 		cancel()
 	}
@@ -178,6 +208,11 @@ func (rl *RedisLock) IsLocked(ctx context.Context) (bool, error) {
 // If called again on the same instance, the Lua script will treat it as reentrant and renew
 // because the value remains unchanged
 func (rl *RedisLock) Acquire(ctx context.Context) error {
+	client, err := rl.currentClient(ctx)
+	if err != nil {
+		globalCallback.OnLockAcquireFailed(rl.key, err)
+		return err
+	}
 	// Set optional timeout for single call
 	runCtx := ctx
 	var cancel context.CancelFunc
@@ -185,7 +220,7 @@ func (rl *RedisLock) Acquire(ctx context.Context) error {
 		runCtx, cancel = context.WithTimeout(ctx, to)
 	}
 	start := time.Now()
-	result, err := lockScript.Run(runCtx, rl.client, []string{rl.ownerKey, rl.countKey}, rl.value, rl.expiration.Milliseconds()).Result()
+	result, err := lockScript.Run(runCtx, client, []string{rl.ownerKey, rl.countKey}, rl.value, rl.expiration.Milliseconds()).Result()
 	if cancel != nil {
 		cancel()
 	}
@@ -213,7 +248,7 @@ func (rl *RedisLock) Acquire(ctx context.Context) error {
 			if to := DefaultLockOptions.ScriptCallTimeout; to > 0 {
 				tctx, tcancel = context.WithTimeout(ctx, to)
 			}
-			token, err := rl.client.Incr(tctx, rl.tokenKey).Result()
+			token, err := client.Incr(tctx, rl.tokenKey).Result()
 			if tcancel != nil {
 				tcancel()
 			}

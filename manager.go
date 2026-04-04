@@ -209,6 +209,11 @@ func (lm *lockManager) waitForRetryDelay(delay time.Duration) bool {
 
 // renewLock renew a single lock (improved version)
 func (lm *lockManager) renewLock(ctx context.Context, lock *RedisLock) error {
+	client, err := lock.currentClient(ctx)
+	if err != nil {
+		return err
+	}
+
 	// Read snapshot to avoid concurrent read-write conflicts
 	lock.mutex.Lock()
 	expiresAtSnap := lock.expiresAt
@@ -223,7 +228,7 @@ func (lm *lockManager) renewLock(ctx context.Context, lock *RedisLock) error {
 
 	// Execute renewal script (using cancellable context)
 	start := time.Now()
-	result, err := renewScript.Run(ctx, lock.client, []string{lock.ownerKey, lock.countKey},
+	result, err := renewScript.Run(ctx, client, []string{lock.ownerKey, lock.countKey},
 		lock.value, expirationSnap.Milliseconds()).Result()
 	// Record renewal latency
 	latency := time.Since(start)

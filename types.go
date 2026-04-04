@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/redis/go-redis/v9"
+	redisplug "github.com/go-lynx/lynx-redis"
 )
 
 // LockOptions configures lock behavior: expiration, retry, renewal, and script timeouts.
@@ -113,16 +113,17 @@ func (NoOpCallback) OnLockRenewalFailed(key string, error error)       {}
 func (NoOpCallback) OnLockAcquireFailed(key string, error error)       {}
 
 // RedisLock implements Redis-based distributed lock.
-// client is UniversalClient so that the lock works with standalone, Cluster, and Sentinel.
+// provider resolves the current UniversalClient on demand so long-lived lock handles do not
+// cache a replaceable Redis client across reconnects or managed restarts.
 type RedisLock struct {
-	client           redis.UniversalClient // Redis client (standalone/cluster/sentinel)
-	key              string                // Lock key name
-	value            string                // Lock value (used to identify holder)
-	expiration       time.Duration         // Lock expiration time
-	expiresAt        time.Time             // Lock expiration time point
-	mutex            sync.Mutex            // Protect internal state
-	renewalThreshold float64               // Renewal threshold
-	acquiredAt       time.Time             // Time when lock was acquired
+	provider         redisplug.Provider // Redis client provider (standalone/cluster/sentinel)
+	key              string             // Lock key name
+	value            string             // Lock value (used to identify holder)
+	expiration       time.Duration      // Lock expiration time
+	expiresAt        time.Time          // Lock expiration time point
+	mutex            sync.Mutex         // Protect internal state
+	renewalThreshold float64            // Renewal threshold
+	acquiredAt       time.Time          // Time when lock was acquired
 
 	// Two keys actually used in Redis (using same hash tag to ensure same slot in cluster)
 	ownerKey string // Key storing holder identifier

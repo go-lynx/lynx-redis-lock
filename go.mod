@@ -4,6 +4,8 @@ go 1.25
 
 toolchain go1.25.3
 
+replace github.com/go-lynx/lynx-redis => ../lynx-redis
+
 require (
 	github.com/go-lynx/lynx v1.6.0-beta
 	github.com/go-lynx/lynx-redis v1.5.2
