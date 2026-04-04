@@ -165,7 +165,9 @@ func (lm *lockManager) renewLockWithRetry(lock *RedisLock, options LockOptions) 
 			if delay > config.MaxDelay {
 				delay = config.MaxDelay
 			}
-			time.Sleep(delay)
+			if !lm.waitForRetryDelay(delay) {
+				return
+			}
 		}
 	}
 
@@ -179,6 +181,30 @@ func (lm *lockManager) renewLockWithRetry(lock *RedisLock, options LockOptions) 
 
 	log.ErrorCtx(context.Background(), "lock renewal failed after retries",
 		"key", lock.key, "retries", maxRetries)
+}
+
+func (lm *lockManager) waitForRetryDelay(delay time.Duration) bool {
+	if delay <= 0 {
+		return true
+	}
+
+	lm.mutex.RLock()
+	ctx := lm.renewCtx
+	lm.mutex.RUnlock()
+	if ctx == nil {
+		time.Sleep(delay)
+		return true
+	}
+
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // renewLock renew a single lock (improved version)

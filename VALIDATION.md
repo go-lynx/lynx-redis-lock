@@ -5,20 +5,22 @@
 Current workspace baseline:
 
 ```bash
-go test ./...
+go test ./... -count=1
+go vet ./...
 ```
 
 Result summary:
 
 ```text
-?   	github.com/go-lynx/lynx-redis-lock    [no test files]
+ok   github.com/go-lynx/lynx-redis-lock    (passes unit tests)
+go vet ./...                               (passes)
 ```
 
 ## What This Means
 
-- This module currently has no committed Go test files in the workspace.
-- The README documents API usage and operational boundaries, but there is no automated coverage for acquire/release, reentrancy, renewal, fencing token, or shutdown semantics yet.
-- Before tightening guarantees in the docs, add executable tests for the renewal manager and Lua-script edge cases.
+- The workspace now has committed unit tests for the renewal manager's retry delay behavior, including prompt exit when shutdown cancels the renewal context.
+- The README documents API usage and operational boundaries, but there is still no Redis-backed automated coverage for acquire/release, reentrancy, Lua edge cases, or fencing token semantics.
+- Before tightening guarantees further, add executable integration tests against a real Redis deployment for the Lua-script paths and long-running renewal flows.
 
 ## Recommended Manual Checks
 
