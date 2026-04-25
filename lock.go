@@ -7,6 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/go-lynx/lynx/pkg/timex"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -275,16 +276,8 @@ func (rl *RedisLock) AcquireWithRetry(ctx context.Context, strategy RetryStrateg
 		}
 		if retries > 0 {
 			// Add jitter to avoid hot spot collisions
-			delay := strategy.RetryDelay
-			if delay > 0 {
-				jitter := time.Duration(float64(delay) * (0.5 + randFloat64()))
-				if jitter > 0 {
-					delay = jitter
-				}
-			}
-			select {
-			case <-time.After(delay):
-			case <-ctx.Done():
+			delay := timex.JitterAround(strategy.RetryDelay, 0.5)
+			if !waitForContextDelay(ctx, delay) {
 				return ctx.Err()
 			}
 		}

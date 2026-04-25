@@ -24,11 +24,13 @@ func TestLockManagerWaitForRetryDelayStopsOnShutdown(t *testing.T) {
 	lm.startRenewalService(DefaultLockOptions)
 
 	resultCh := make(chan bool, 1)
+	readyCh := make(chan struct{})
 	go func() {
+		close(readyCh)
 		resultCh <- lm.waitForRetryDelay(5 * time.Second)
 	}()
 
-	time.Sleep(30 * time.Millisecond)
+	<-readyCh
 	start := time.Now()
 	lm.stopRenewalService()
 

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/go-lynx/lynx/log"
+	"github.com/go-lynx/lynx/pkg/timex"
 )
 
 // Lock acquires a distributed lock for the specified key and executes the callback function, automatically releasing the lock after execution.
@@ -229,16 +230,8 @@ func LockWithOptions(ctx context.Context, key string, options LockOptions, fn fu
 		// If not the first attempt, wait according to strategy before retrying (add jitter to reduce simultaneous collisions)
 		if retries > 0 {
 			// Add jitter to avoid hot spot collisions
-			delay := options.RetryStrategy.RetryDelay
-			if delay > 0 {
-				jitter := time.Duration(float64(delay) * (0.5 + randFloat64()))
-				if jitter > 0 {
-					delay = jitter
-				}
-			}
-			select {
-			case <-time.After(delay):
-			case <-ctx.Done():
+			delay := timex.JitterAround(options.RetryStrategy.RetryDelay, 0.5)
+			if !waitForContextDelay(ctx, delay) {
 				return ctx.Err()
 			}
 		}

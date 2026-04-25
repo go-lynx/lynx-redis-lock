@@ -3,7 +3,6 @@ package redislock
 import (
 	"context"
 	"fmt"
-	"math/rand"
 	"sync"
 	"time"
 
@@ -132,20 +131,6 @@ type RedisLock struct {
 	// Note: token is only incremented and recorded on first acquisition (non-reentrant).
 	tokenKey string
 	token    int64
-}
-
-// rng provides package-local randomness; guard with mutex for concurrency safety.
-var (
-	rng   = rand.New(rand.NewSource(time.Now().UnixNano()))
-	rngMu sync.Mutex
-)
-
-// randFloat64 returns a random float64 in [0.0, 1.0) using the local RNG.
-func randFloat64() float64 {
-	rngMu.Lock()
-	v := rng.Float64()
-	rngMu.Unlock()
-	return v
 }
 
 // lockManager manages all distributed lock instances

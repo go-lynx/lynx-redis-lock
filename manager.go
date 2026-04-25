@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/go-lynx/lynx/log"
+	"github.com/go-lynx/lynx/pkg/timex"
 )
 
 // Global lock manager
@@ -154,17 +155,7 @@ func (lm *lockManager) renewLockWithRetry(lock *RedisLock, options LockOptions) 
 
 		// Exponential backoff retry + jitter (50%~150%) to reduce concentrated competition
 		if i < maxRetries-1 {
-			delay := config.BaseDelay * time.Duration(1<<i)
-			// Add jitter 50%~150%
-			if delay > 0 {
-				jitter := time.Duration(float64(delay) * (0.5 + randFloat64()))
-				if jitter > 0 {
-					delay = jitter
-				}
-			}
-			if delay > config.MaxDelay {
-				delay = config.MaxDelay
-			}
+			delay := timex.ExponentialBackoff(config.BaseDelay, config.MaxDelay, i, 0.5)
 			if !lm.waitForRetryDelay(delay) {
 				return
 			}
@@ -191,6 +182,18 @@ func (lm *lockManager) waitForRetryDelay(delay time.Duration) bool {
 	lm.mutex.RLock()
 	ctx := lm.renewCtx
 	lm.mutex.RUnlock()
+	if ctx == nil {
+		time.Sleep(delay)
+		return true
+	}
+
+	return waitForContextDelay(ctx, delay)
+}
+
+func waitForContextDelay(ctx context.Context, delay time.Duration) bool {
+	if delay <= 0 {
+		return true
+	}
 	if ctx == nil {
 		time.Sleep(delay)
 		return true
