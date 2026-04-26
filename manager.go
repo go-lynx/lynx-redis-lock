@@ -3,6 +3,7 @@ package redislock
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -22,13 +23,71 @@ var globalLockManager = &lockManager{
 
 // Global callback instance
 var globalCallback LockCallback = NoOpCallback{}
+var globalCallbackMu sync.RWMutex
 
 // SetCallback sets the global callback
 func SetCallback(callback LockCallback) {
 	if callback == nil {
 		callback = NoOpCallback{}
 	}
+	globalCallbackMu.Lock()
+	defer globalCallbackMu.Unlock()
 	globalCallback = callback
+}
+
+func currentCallback() LockCallback {
+	globalCallbackMu.RLock()
+	defer globalCallbackMu.RUnlock()
+	if globalCallback == nil {
+		return NoOpCallback{}
+	}
+	return globalCallback
+}
+
+func addManagedLock(lock *RedisLock) {
+	if lock == nil {
+		return
+	}
+	globalLockManager.mutex.Lock()
+	defer globalLockManager.mutex.Unlock()
+	if existing, exists := globalLockManager.locks[lock.key]; exists {
+		if existing != lock {
+			globalLockManager.locks[lock.key] = lock
+		}
+		return
+	}
+	globalLockManager.locks[lock.key] = lock
+	atomic.AddInt64(&globalLockManager.stats.TotalLocks, 1)
+	atomic.AddInt64(&globalLockManager.stats.ActiveLocks, 1)
+	activeLocksInc()
+}
+
+func removeManagedLock(lock *RedisLock) bool {
+	if lock == nil {
+		return false
+	}
+	globalLockManager.mutex.Lock()
+	defer globalLockManager.mutex.Unlock()
+	existing, exists := globalLockManager.locks[lock.key]
+	if !exists || existing != lock {
+		return false
+	}
+	delete(globalLockManager.locks, lock.key)
+	decrementActiveLocks()
+	return true
+}
+
+func decrementActiveLocks() {
+	for {
+		current := atomic.LoadInt64(&globalLockManager.stats.ActiveLocks)
+		if current <= 0 {
+			return
+		}
+		if atomic.CompareAndSwapInt64(&globalLockManager.stats.ActiveLocks, current, current-1) {
+			activeLocksDec()
+			return
+		}
+	}
 }
 
 // startRenewalService starts the global renewal goroutine and worker pool (idempotent; only one goroutine runs).
@@ -165,10 +224,7 @@ func (lm *lockManager) renewLockWithRetry(lock *RedisLock, options LockOptions) 
 	// Retry failed: remove lock from manager and stop renewing this lock.
 	// We do NOT run the unlock script here; the key in Redis will expire naturally after remaining TTL.
 	// See LIMITATIONS.md "Behavior after renewal failure" for semantics and recommendations.
-	lm.mutex.Lock()
-	delete(lm.locks, lock.key)
-	atomic.AddInt64(&lm.stats.ActiveLocks, -1)
-	lm.mutex.Unlock()
+	removeManagedLock(lock)
 
 	log.ErrorCtx(context.Background(), "lock renewal failed after retries",
 		"key", lock.key, "retries", maxRetries)
@@ -255,11 +311,7 @@ func (lm *lockManager) renewLock(ctx context.Context, lock *RedisLock) error {
 		incRenew("success")
 		return nil
 	case 0, -1, -2: // Lock does not exist or not current holder
-		lm.mutex.Lock()
-		delete(lm.locks, lock.key)
-		atomic.AddInt64(&lm.stats.ActiveLocks, -1)
-		lm.mutex.Unlock()
-		activeLocksDec()
+		removeManagedLock(lock)
 		// More detailed distinction
 		switch n {
 		case 0:

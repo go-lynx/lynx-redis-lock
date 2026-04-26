@@ -38,6 +38,31 @@ func (lo *LockOptions) Validate() error {
 	return lo.RetryStrategy.Validate()
 }
 
+func normalizeLockOptions(options LockOptions) LockOptions {
+	if options.RenewalThreshold == 0 {
+		options.RenewalThreshold = DefaultLockOptions.RenewalThreshold
+	}
+	if options.WorkerPoolSize == 0 {
+		options.WorkerPoolSize = DefaultLockOptions.WorkerPoolSize
+	}
+	if options.RenewalConfig.MaxRetries == 0 {
+		options.RenewalConfig.MaxRetries = DefaultLockOptions.RenewalConfig.MaxRetries
+	}
+	if options.RenewalConfig.BaseDelay == 0 {
+		options.RenewalConfig.BaseDelay = DefaultLockOptions.RenewalConfig.BaseDelay
+	}
+	if options.RenewalConfig.MaxDelay == 0 {
+		options.RenewalConfig.MaxDelay = DefaultLockOptions.RenewalConfig.MaxDelay
+	}
+	if options.RenewalConfig.CheckInterval == 0 {
+		options.RenewalConfig.CheckInterval = DefaultLockOptions.RenewalConfig.CheckInterval
+	}
+	if options.RenewalConfig.CallTimeout == 0 {
+		options.RenewalConfig.CallTimeout = DefaultLockOptions.RenewalConfig.CallTimeout
+	}
+	return options
+}
+
 // MaxLockKeyLength is the maximum allowed length for a lock key (business key, not the internal Redis key).
 const MaxLockKeyLength = 255
 

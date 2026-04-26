@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync/atomic"
 	"time"
 
 	"github.com/go-lynx/lynx/pkg/timex"
@@ -89,7 +88,7 @@ func (rl *RedisLock) IsExpired() bool {
 func (rl *RedisLock) Renew(ctx context.Context, newExpiration time.Duration) error {
 	client, err := rl.currentClient(ctx)
 	if err != nil {
-		globalCallback.OnLockRenewalFailed(rl.key, err)
+		currentCallback().OnLockRenewalFailed(rl.key, err)
 		return err
 	}
 	// Set optional timeout for single call
@@ -107,14 +106,14 @@ func (rl *RedisLock) Renew(ctx context.Context, newExpiration time.Duration) err
 	}
 	observeScriptLatency("renew", time.Since(start))
 	if err != nil {
-		globalCallback.OnLockRenewalFailed(rl.key, err)
+		currentCallback().OnLockRenewalFailed(rl.key, err)
 		return fmt.Errorf("renewal script execution failed: %w", err)
 	}
 
 	n, ok := result.(int64)
 	if !ok {
 		err := fmt.Errorf("unknown renewal result type: %T", result)
-		globalCallback.OnLockRenewalFailed(rl.key, err)
+		currentCallback().OnLockRenewalFailed(rl.key, err)
 		return err
 	}
 	switch n {
@@ -124,14 +123,14 @@ func (rl *RedisLock) Renew(ctx context.Context, newExpiration time.Duration) err
 		rl.expiration = newExpiration
 		rl.expiresAt = now.Add(newExpiration)
 		rl.mutex.Unlock()
-		globalCallback.OnLockRenewed(rl.key, newExpiration)
+		currentCallback().OnLockRenewed(rl.key, newExpiration)
 		return nil
 	case 0, -1, -2: // Lock does not exist or not current holder
-		globalCallback.OnLockRenewalFailed(rl.key, ErrLockRenewalFailed)
+		currentCallback().OnLockRenewalFailed(rl.key, ErrLockRenewalFailed)
 		return ErrLockRenewalFailed
 	default:
 		err := fmt.Errorf("unknown renewal result: %d", n)
-		globalCallback.OnLockRenewalFailed(rl.key, err)
+		currentCallback().OnLockRenewalFailed(rl.key, err)
 		return err
 	}
 }
@@ -169,7 +168,8 @@ func (rl *RedisLock) Release(ctx context.Context) error {
 		return nil
 	case 1: // Fully released lock
 		duration := time.Since(rl.acquiredAt)
-		globalCallback.OnLockReleased(rl.key, duration)
+		removeManagedLock(rl)
+		currentCallback().OnLockReleased(rl.key, duration)
 		return nil
 	case 0: // Lock does not exist
 		return ErrLockNotHeld
@@ -211,7 +211,7 @@ func (rl *RedisLock) IsLocked(ctx context.Context) (bool, error) {
 func (rl *RedisLock) Acquire(ctx context.Context) error {
 	client, err := rl.currentClient(ctx)
 	if err != nil {
-		globalCallback.OnLockAcquireFailed(rl.key, err)
+		currentCallback().OnLockAcquireFailed(rl.key, err)
 		return err
 	}
 	// Set optional timeout for single call
@@ -253,17 +253,24 @@ func (rl *RedisLock) Acquire(ctx context.Context) error {
 			if tcancel != nil {
 				tcancel()
 			}
-			if err == nil {
-				rl.mutex.Lock()
-				rl.token = token
-				rl.mutex.Unlock()
+			if err != nil {
+				releaseCtx, releaseCancel := cleanupContext(DefaultLockOptions.ScriptCallTimeout)
+				releaseErr := rl.Release(releaseCtx)
+				releaseCancel()
+				if releaseErr != nil {
+					return fmt.Errorf("fencing token generation failed: %w; best-effort release failed: %v", err, releaseErr)
+				}
+				return fmt.Errorf("fencing token generation failed: %w", err)
 			}
+			rl.mutex.Lock()
+			rl.token = token
+			rl.mutex.Unlock()
 		}
-		globalCallback.OnLockAcquired(rl.key, rl.expiration)
+		currentCallback().OnLockAcquired(rl.key, rl.expiration)
 		return nil
 	}
 	// Occupied by another holder
-	globalCallback.OnLockAcquireFailed(rl.key, ErrLockAcquireConflict)
+	currentCallback().OnLockAcquireFailed(rl.key, ErrLockAcquireConflict)
 	return ErrLockAcquireConflict
 }
 
@@ -298,12 +305,6 @@ func (rl *RedisLock) AcquireWithRetry(ctx context.Context, strategy RetryStrateg
 
 // EnableAutoRenew registers the current lock to the global renewal manager (starts if not already started)
 func (rl *RedisLock) EnableAutoRenew(options LockOptions) {
-	globalLockManager.mutex.Lock()
-	if _, exists := globalLockManager.locks[rl.key]; !exists {
-		globalLockManager.locks[rl.key] = rl
-		atomic.AddInt64(&globalLockManager.stats.TotalLocks, 1)
-		atomic.AddInt64(&globalLockManager.stats.ActiveLocks, 1)
-	}
-	globalLockManager.mutex.Unlock()
+	addManagedLock(rl)
 	globalLockManager.startRenewalService(options)
 }
