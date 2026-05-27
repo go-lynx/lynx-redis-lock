@@ -7,7 +7,7 @@ toolchain go1.26.2
 replace github.com/go-lynx/lynx-redis => ../lynx-redis
 
 require (
-	github.com/go-lynx/lynx v1.6.0-beta
+	github.com/go-lynx/lynx v1.6.1
 	github.com/go-lynx/lynx-redis v1.6.0-beta
 	github.com/prometheus/client_golang v1.23.0
 	github.com/redis/go-redis/v9 v9.12.1
@@ -50,5 +50,3 @@ require (
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
-
-replace github.com/go-lynx/lynx => ../lynx
