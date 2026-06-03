@@ -165,17 +165,22 @@ func (rl *RedisLock) Release(ctx context.Context) error {
 	}
 	switch n {
 	case 2: // Partial release (still held)
+		incUnlock("partial")
 		return nil
 	case 1: // Fully released lock
+		incUnlock("full")
 		duration := time.Since(rl.acquiredAt)
 		removeManagedLock(rl)
 		currentCallback().OnLockReleased(rl.key, duration)
 		return nil
 	case 0: // Lock does not exist
+		incUnlock("not_held")
 		return ErrLockNotHeld
 	case -1: // Lock exists but not current holder
+		incUnlock("not_held")
 		return ErrLockNotHeld
 	default:
+		incUnlock("error")
 		return fmt.Errorf("unknown unlock result: %d", n)
 	}
 }
@@ -227,11 +232,13 @@ func (rl *RedisLock) Acquire(ctx context.Context) error {
 	}
 	observeScriptLatency("acquire", time.Since(start))
 	if err != nil {
+		incAcquire("error")
 		return fmt.Errorf("lock script execution failed: %w", err)
 	}
 
 	n, ok := result.(int64)
 	if !ok {
+		incAcquire("error")
 		return fmt.Errorf("unknown lock result type: %T", result)
 	}
 	if n > 0 {
@@ -254,6 +261,7 @@ func (rl *RedisLock) Acquire(ctx context.Context) error {
 				tcancel()
 			}
 			if err != nil {
+				incAcquire("error")
 				releaseCtx, releaseCancel := cleanupContext(DefaultLockOptions.ScriptCallTimeout)
 				releaseErr := rl.Release(releaseCtx)
 				releaseCancel()
@@ -266,10 +274,12 @@ func (rl *RedisLock) Acquire(ctx context.Context) error {
 			rl.token = token
 			rl.mutex.Unlock()
 		}
+		incAcquire("success")
 		currentCallback().OnLockAcquired(rl.key, rl.expiration)
 		return nil
 	}
 	// Occupied by another holder
+	incAcquire("conflict")
 	currentCallback().OnLockAcquireFailed(rl.key, ErrLockAcquireConflict)
 	return ErrLockAcquireConflict
 }

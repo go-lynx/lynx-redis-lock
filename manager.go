@@ -108,6 +108,15 @@ func (lm *lockManager) startRenewalService(options LockOptions) {
 	lm.mutex.Unlock()
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.ErrorCtx(context.Background(), "panic in renewal service goroutine", "recover", r)
+				// Mark the service as stopped so it can be restarted on the next lock acquisition.
+				lm.mutex.Lock()
+				lm.running = false
+				lm.mutex.Unlock()
+			}
+		}()
 		checkInterval := options.RenewalConfig.CheckInterval
 		if checkInterval <= 0 {
 			checkInterval = DefaultRenewalConfig.CheckInterval
@@ -173,8 +182,17 @@ func (lm *lockManager) processRenewals(options LockOptions) {
 		case <-lm.renewCtx.Done():
 			return
 		case lm.workerPool <- struct{}{}:
+			// Capture the channel reference before launching the goroutine so that
+			// concurrent resets of lm.workerPool (e.g. in tests) cannot race with
+			// the deferred release.
+			pool := lm.workerPool
 			go func(l *RedisLock) {
-				defer func() { <-lm.workerPool }()
+				defer func() {
+					<-pool
+					if r := recover(); r != nil {
+						log.ErrorCtx(context.Background(), "panic in lock renewal worker", "key", l.key, "recover", r)
+					}
+				}()
 				lm.renewLockWithRetry(l, options)
 			}(lock)
 		default:
@@ -351,14 +369,16 @@ func GetStats() map[string]int64 {
 func Shutdown(ctx context.Context) error {
 	globalLockManager.stopRenewalService()
 
-	// Wait for all locks to be released or timeout
-	timeout := time.After(10 * time.Second)
+	// Wait for all locks to be released or timeout.
+	// Use a timer (not time.After) so we can stop it and avoid a goroutine leak.
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-timeout:
+		case <-timer.C:
 			return fmt.Errorf("shutdown timeout, %d locks still active",
 				atomic.LoadInt64(&globalLockManager.stats.ActiveLocks))
 		case <-ticker.C:

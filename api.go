@@ -120,14 +120,19 @@ func UnlockByValue(ctx context.Context, key, value string) error {
 	switch n {
 	case 2:
 		// Partial release (still held)
+		incUnlock("partial")
 		return nil
 	case 1:
+		incUnlock("full")
 		return nil
 	case 0:
+		incUnlock("not_held")
 		return ErrLockNotHeld
 	case -1:
+		incUnlock("not_held")
 		return ErrLockNotHeld
 	default:
+		incUnlock("error")
 		return fmt.Errorf("unknown unlock result: %d", n)
 	}
 }
@@ -225,10 +230,12 @@ func LockWithOptions(ctx context.Context, key string, options LockOptions, fn fu
 		countKey:         countKey,
 		tokenKey:         tokenKey,
 	}
-	// Try to acquire lock
+	// Try to acquire lock; track total wait time for the wait_duration_seconds metric.
+	waitStart := time.Now()
 	for retries := 0; ; retries++ {
 		// Check if maximum retry count is exceeded
 		if options.RetryStrategy.MaxRetries > 0 && retries >= options.RetryStrategy.MaxRetries {
+			observeWaitDuration("timeout", time.Since(waitStart))
 			return ErrMaxRetriesExceeded
 		}
 		// If not the first attempt, wait according to strategy before retrying (add jitter to reduce simultaneous collisions)
@@ -236,6 +243,7 @@ func LockWithOptions(ctx context.Context, key string, options LockOptions, fn fu
 			// Add jitter to avoid hot spot collisions
 			delay := timex.JitterAround(options.RetryStrategy.RetryDelay, 0.5)
 			if !waitForContextDelay(ctx, delay) {
+				observeWaitDuration("timeout", time.Since(waitStart))
 				return ctx.Err()
 			}
 		}
@@ -250,6 +258,7 @@ func LockWithOptions(ctx context.Context, key string, options LockOptions, fn fu
 			if cancel != nil {
 				cancel()
 			}
+			observeWaitDuration("error", time.Since(waitStart))
 			return err
 		}
 		start := time.Now()
@@ -261,14 +270,17 @@ func LockWithOptions(ctx context.Context, key string, options LockOptions, fn fu
 		observeScriptLatency("acquire", time.Since(start))
 		if err != nil {
 			incAcquire("error")
+			observeWaitDuration("error", time.Since(waitStart))
 			return fmt.Errorf("lock script execution failed: %w", err)
 		}
 		// Handle lock result
 		n, ok := result.(int64)
 		if !ok {
+			observeWaitDuration("error", time.Since(waitStart))
 			return fmt.Errorf("unknown lock result type: %T", result)
 		}
 		if n > 0 {
+			observeWaitDuration("success", time.Since(waitStart))
 			// Use the same timestamp to avoid repeated time.Now() calls; protect with mutex to avoid data race with renewal goroutine
 			now := time.Now()
 			lock.mutex.Lock()
@@ -337,6 +349,7 @@ func LockWithOptions(ctx context.Context, key string, options LockOptions, fn fu
 		currentCallback().OnLockAcquireFailed(key, ErrLockAcquireConflict)
 		// If no retry needed, return error directly
 		if options.RetryStrategy.MaxRetries == 0 {
+			observeWaitDuration("conflict", time.Since(waitStart))
 			return ErrLockAcquireConflict
 		}
 		// Otherwise continue retrying

@@ -69,6 +69,19 @@ var (
 		},
 		[]string{"op"}, // acquire|unlock|renew
 	)
+
+	// lockWaitDuration tracks the total time a caller spent waiting (including all retries)
+	// before successfully acquiring the lock or giving up.
+	lockWaitDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: "lynx",
+			Subsystem: "redis_lock",
+			Name:      "wait_duration_seconds",
+			Help:      "Total time a caller waited to acquire the lock, including all retry delays.",
+			Buckets:   []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
+		},
+		[]string{"result"}, // success|conflict|timeout|error
+	)
 )
 
 // InitMetrics registers the collectors to the provided Registerer.
@@ -120,6 +133,13 @@ func InitMetrics(reg prometheus.Registerer) {
 			return
 		}
 	}
+	if err := reg.Register(lockWaitDuration); err != nil {
+		var alreadyRegisteredError prometheus.AlreadyRegisteredError
+		if !errors.As(err, &alreadyRegisteredError) {
+			log.Errorf("Failed to register lockWaitDuration metric: %v", err)
+			return
+		}
+	}
 }
 
 // observeScriptLatency and inc* record metrics from lock/script calls; used only inside this package.
@@ -135,3 +155,7 @@ func incSkippedRenewal() { skippedRenewalsTotal.Inc() }
 
 func activeLocksInc() { activeLocks.Inc() }
 func activeLocksDec() { activeLocks.Dec() }
+
+func observeWaitDuration(result string, d time.Duration) {
+	lockWaitDuration.WithLabelValues(result).Observe(d.Seconds())
+}
