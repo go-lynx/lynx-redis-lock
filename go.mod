@@ -7,7 +7,8 @@ toolchain go1.26.2
 replace github.com/go-lynx/lynx-redis => ../lynx-redis
 
 require (
-	github.com/go-lynx/lynx v1.6.1
+	github.com/alicebob/miniredis/v2 v2.37.0
+	github.com/go-lynx/lynx v1.6.2
 	github.com/go-lynx/lynx-redis v1.6.0-beta
 	github.com/prometheus/client_golang v1.23.0
 	github.com/redis/go-redis/v9 v9.12.1
@@ -16,7 +17,6 @@ require (
 require (
 	dario.cat/mergo v1.0.0 // indirect
 	github.com/Masterminds/semver/v3 v3.4.0 // indirect
-	github.com/alicebob/miniredis/v2 v2.37.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
