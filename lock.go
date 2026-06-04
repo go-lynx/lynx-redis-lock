@@ -91,7 +91,6 @@ func (rl *RedisLock) Renew(ctx context.Context, newExpiration time.Duration) err
 		currentCallback().OnLockRenewalFailed(rl.key, err)
 		return err
 	}
-	// Set optional timeout for single call
 	runCtx := ctx
 	var cancel context.CancelFunc
 	if to := DefaultLockOptions.ScriptCallTimeout; to > 0 {
@@ -141,7 +140,6 @@ func (rl *RedisLock) Release(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// Set optional timeout for single call
 	runCtx := ctx
 	var cancel context.CancelFunc
 	if to := DefaultLockOptions.ScriptCallTimeout; to > 0 {
@@ -158,7 +156,6 @@ func (rl *RedisLock) Release(ctx context.Context) error {
 		return fmt.Errorf("unlock script execution failed: %w", err)
 	}
 
-	// Check if lock was successfully released
 	n, ok := result.(int64)
 	if !ok {
 		return fmt.Errorf("unknown unlock result type: %T", result)
@@ -191,7 +188,6 @@ func (rl *RedisLock) IsLocked(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	// Set optional timeout for single call
 	runCtx := ctx
 	var cancel context.CancelFunc
 	if to := DefaultLockOptions.ScriptCallTimeout; to > 0 {
@@ -219,7 +215,6 @@ func (rl *RedisLock) Acquire(ctx context.Context) error {
 		currentCallback().OnLockAcquireFailed(rl.key, err)
 		return err
 	}
-	// Set optional timeout for single call
 	runCtx := ctx
 	var cancel context.CancelFunc
 	if to := DefaultLockOptions.ScriptCallTimeout; to > 0 {
@@ -292,7 +287,7 @@ func (rl *RedisLock) AcquireWithRetry(ctx context.Context, strategy RetryStrateg
 			return ErrMaxRetriesExceeded
 		}
 		if retries > 0 {
-			// Add jitter to avoid hot spot collisions
+			// Jitter the delay so contending acquirers don't retry in lockstep.
 			delay := timex.JitterAround(strategy.RetryDelay, 0.5)
 			if !waitForContextDelay(ctx, delay) {
 				return ctx.Err()
@@ -305,7 +300,7 @@ func (rl *RedisLock) AcquireWithRetry(ctx context.Context, strategy RetryStrateg
 		if err != ErrLockAcquireConflict {
 			return err
 		}
-		// Continue retrying according to strategy on conflict
+		// Only contention is retryable; with no retry budget, report the conflict.
 		if strategy.MaxRetries == 0 {
 			return ErrLockAcquireConflict
 		}

@@ -14,7 +14,6 @@ import (
 // - Uses Lua script for atomic lock acquisition/reentrancy, avoiding race conditions.
 // - If renewal is enabled, registers in global manager and automatically renews until function execution ends.
 func Lock(ctx context.Context, key string, expiration time.Duration, fn func() error) error {
-	// Use DefaultLockOptions as base configuration, only overriding Expiration
 	options := DefaultLockOptions
 	options.Expiration = expiration
 	return LockWithOptions(ctx, key, options, fn)
@@ -27,27 +26,23 @@ func LockWithToken(ctx context.Context, key string, expiration time.Duration, fn
 	if fn == nil {
 		return ErrLockFnRequired
 	}
-	// Build based on default options
 	options := DefaultLockOptions
 	options.Expiration = expiration
 
-	// Create lock instance (not actively locking)
 	lock, err := NewLock(ctx, key, options)
 	if err != nil {
 		return err
 	}
 
-	// Try to acquire with default retry strategy
 	if err := lock.AcquireWithRetry(ctx, options.RetryStrategy); err != nil {
 		return err
 	}
 
-	// If renewal is enabled, include in global management
 	if options.RenewalEnabled {
 		lock.EnableAutoRenew(options)
 	}
 
-	// Ensure final release
+	// Always release on return.
 	defer func() {
 		to := options.ScriptCallTimeout
 		if to <= 0 {
@@ -67,7 +62,7 @@ func LockWithToken(ctx context.Context, key string, expiration time.Duration, fn
 		observeScriptLatency("unlock", time.Since(start))
 	}()
 
-	// Execute business callback, passing token (positive integer if first acquisition, otherwise 0)
+	// The token is the fencing token: non-zero on first acquisition, 0 on reentry.
 	retErr = fn(lock.GetToken())
 	return retErr
 }
@@ -81,11 +76,9 @@ func LockWithToken(ctx context.Context, key string, expiration time.Duration, fn
 // Timeout explanation:
 // - Single script call uses DefaultLockOptions.ScriptCallTimeout as optional per-call timeout.
 func UnlockByValue(ctx context.Context, key, value string) error {
-	// Validate lock key name
 	if err := ValidateKey(key); err != nil {
 		return newLockError(ErrCodeInvalidOptions, "invalid lock key", err)
 	}
-	// Get Redis client (UniversalClient for standalone/cluster/sentinel)
 	provider, err := resolveRedisProvider()
 	if err != nil {
 		return err
@@ -97,14 +90,13 @@ func UnlockByValue(ctx context.Context, key, value string) error {
 		}
 		return fmt.Errorf("%w: %v", ErrRedisClientNotFound, err)
 	}
-	// Build lock keys
 	ownerKey, countKey := buildLockKeys(key)
-	// Execute unlock script
 	runCtx := ctx
 	var cancel context.CancelFunc
 	if to := DefaultLockOptions.ScriptCallTimeout; to > 0 {
 		runCtx, cancel = context.WithTimeout(ctx, to)
 	}
+	// Pass TTL=0 so a partial release decrements the count without refreshing TTL.
 	result, err := unlockScript.Run(runCtx, client, []string{ownerKey, countKey}, value, int64(0)).Result()
 	if cancel != nil {
 		cancel()
@@ -112,7 +104,6 @@ func UnlockByValue(ctx context.Context, key, value string) error {
 	if err != nil {
 		return fmt.Errorf("unlock script execution failed: %w", err)
 	}
-	// Handle unlock result
 	n, ok := result.(int64)
 	if !ok {
 		return fmt.Errorf("unknown unlock result type: %T", result)
@@ -144,25 +135,19 @@ func UnlockByValue(ctx context.Context, key, value string) error {
 // - Redis Cluster: internal ownerKey and countKey use the same hashtag to ensure same slot for Lua atomic operations.
 func NewLock(ctx context.Context, key string, options LockOptions) (*RedisLock, error) {
 	options = normalizeLockOptions(options)
-	// Validate lock key name
 	if err := ValidateKey(key); err != nil {
 		return nil, newLockError(ErrCodeInvalidOptions, "invalid lock key", err)
 	}
-	// Validate configuration options
 	if err := options.Validate(); err != nil {
 		return nil, newLockError(ErrCodeInvalidOptions, "invalid lock options", err)
 	}
-	// Get Redis client (UniversalClient for standalone/cluster/sentinel)
 	provider, err := resolveRedisProvider()
 	if err != nil {
 		return nil, err
 	}
-	// Build lock keys and fencing token key
 	ownerKey, countKey := buildLockKeys(key)
 	tokenKey := buildTokenKey(key)
-	// Generate lock value
 	value := generateLockValue()
-	// Create lock instance
 	lock := &RedisLock{
 		provider:         provider,
 		key:              key,
@@ -180,7 +165,6 @@ func NewLock(ctx context.Context, key string, options LockOptions) (*RedisLock, 
 // - Based on DefaultLockOptions, overrides Expiration and RetryStrategy, others use defaults.
 // - Uses random jitter (0.5~1.5x) during retries to reduce hot spot collisions.
 func LockWithRetry(ctx context.Context, key string, expiration time.Duration, fn func() error, strategy RetryStrategy) error {
-	// Use DefaultLockOptions as base configuration, override Expiration and RetryStrategy
 	options := DefaultLockOptions
 	options.Expiration = expiration
 	options.RetryStrategy = strategy
@@ -197,29 +181,22 @@ func LockWithRetry(ctx context.Context, key string, expiration time.Duration, fn
 // - Acquisition failures due to contention will trigger OnLockAcquireFailed callback and decide whether to continue based on retry strategy.
 func LockWithOptions(ctx context.Context, key string, options LockOptions, fn func() error) (retErr error) {
 	options = normalizeLockOptions(options)
-	// Validate callback function
 	if fn == nil {
 		return ErrLockFnRequired
 	}
-	// Validate lock key name
 	if err := ValidateKey(key); err != nil {
 		return newLockError(ErrCodeInvalidOptions, "invalid lock key", err)
 	}
-	// Validate configuration options
 	if err := options.Validate(); err != nil {
 		return newLockError(ErrCodeInvalidOptions, "invalid lock options", err)
 	}
-	// Get Redis client (UniversalClient for standalone/cluster/sentinel)
 	provider, err := resolveRedisProvider()
 	if err != nil {
 		return err
 	}
-	// Generate lock value
 	value := generateLockValue()
-	// Build lock keys (include tokenKey for consistency with NewLock; LockWithOptions does not use token)
 	ownerKey, countKey := buildLockKeys(key)
 	tokenKey := buildTokenKey(key)
-	// Create lock instance
 	lock := &RedisLock{
 		provider:         provider,
 		key:              key,
@@ -233,21 +210,18 @@ func LockWithOptions(ctx context.Context, key string, options LockOptions, fn fu
 	// Try to acquire lock; track total wait time for the wait_duration_seconds metric.
 	waitStart := time.Now()
 	for retries := 0; ; retries++ {
-		// Check if maximum retry count is exceeded
 		if options.RetryStrategy.MaxRetries > 0 && retries >= options.RetryStrategy.MaxRetries {
 			observeWaitDuration("timeout", time.Since(waitStart))
 			return ErrMaxRetriesExceeded
 		}
-		// If not the first attempt, wait according to strategy before retrying (add jitter to reduce simultaneous collisions)
 		if retries > 0 {
-			// Add jitter to avoid hot spot collisions
+			// Jitter the delay so contending acquirers don't retry in lockstep.
 			delay := timex.JitterAround(options.RetryStrategy.RetryDelay, 0.5)
 			if !waitForContextDelay(ctx, delay) {
 				observeWaitDuration("timeout", time.Since(waitStart))
 				return ctx.Err()
 			}
 		}
-		// Execute lock script (optional per-call timeout, cancel immediately after Run to release resources)
 		runCtx := ctx
 		var cancel context.CancelFunc
 		if to := options.ScriptCallTimeout; to > 0 {
@@ -273,7 +247,6 @@ func LockWithOptions(ctx context.Context, key string, options LockOptions, fn fu
 			observeWaitDuration("error", time.Since(waitStart))
 			return fmt.Errorf("lock script execution failed: %w", err)
 		}
-		// Handle lock result
 		n, ok := result.(int64)
 		if !ok {
 			observeWaitDuration("error", time.Since(waitStart))
@@ -281,27 +254,22 @@ func LockWithOptions(ctx context.Context, key string, options LockOptions, fn fu
 		}
 		if n > 0 {
 			observeWaitDuration("success", time.Since(waitStart))
-			// Use the same timestamp to avoid repeated time.Now() calls; protect with mutex to avoid data race with renewal goroutine
+			// Single timestamp under mutex to avoid racing the renewal goroutine.
 			now := time.Now()
 			lock.mutex.Lock()
 			lock.expiresAt = now.Add(lock.expiration)
 			lock.acquiredAt = now
 			lock.mutex.Unlock()
 			incAcquire("success")
-			// Trigger lock acquired callback
 			currentCallback().OnLockAcquired(key, lock.expiration)
-			// If renewal is enabled, add to global lock manager (renewal runs in a background goroutine;
-			// when debugging with breakpoints the process is suspended so renewal will not run)
 			if options.RenewalEnabled {
 				addManagedLock(lock)
-				// Start renewal service
 				globalLockManager.startRenewalService(options)
 			}
-			// Use defer to ensure lock is released
 			inManager := options.RenewalEnabled
 			defer func() {
-				// Use an independent short timeout context so cancellation of the business ctx
-				// does not prevent best-effort lock release.
+				// Release on an independent short-timeout context so a cancelled
+				// business ctx cannot block best-effort release.
 				to := options.ScriptCallTimeout
 				if to <= 0 {
 					to = DefaultLockOptions.ScriptCallTimeout
@@ -322,16 +290,16 @@ func LockWithOptions(ctx context.Context, key string, options LockOptions, fn fu
 					cancel()
 				}
 				observeScriptLatency("unlock", time.Since(start))
-				// Only remove from manager when fully released (partial release needs to continue renewal)
+				// Only drop from the manager once fully released; a reentrant
+				// partial release must keep being renewed.
 				if inManager {
-					// Use short timeout context for IsLocked query to avoid blocking
 					cctx, ccancel := cleanupContext(to)
 					stillHeld, checkErr := lock.IsLocked(cctx)
 					if ccancel != nil {
 						ccancel()
 					}
 					if checkErr != nil {
-						// Conservative: if check fails, keep in manager so renewal is not lost
+						// On an uncertain check, keep it managed so renewal isn't lost.
 						log.ErrorCtx(ctx, "failed to check lock held after release", "error", checkErr)
 						return
 					}
@@ -340,19 +308,15 @@ func LockWithOptions(ctx context.Context, key string, options LockOptions, fn fu
 					}
 				}
 			}()
-			// Execute user function
 			retErr = fn()
 			return retErr
 		}
-		// Trigger lock acquire failed callback (conflict scenario)
 		incAcquire("conflict")
 		currentCallback().OnLockAcquireFailed(key, ErrLockAcquireConflict)
-		// If no retry needed, return error directly
 		if options.RetryStrategy.MaxRetries == 0 {
 			observeWaitDuration("conflict", time.Since(waitStart))
 			return ErrLockAcquireConflict
 		}
-		// Otherwise continue retrying
 		continue
 	}
 }

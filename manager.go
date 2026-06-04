@@ -11,21 +11,19 @@ import (
 	"github.com/go-lynx/lynx/pkg/timex"
 )
 
-// Global lock manager
-// Description:
-// - Renewal service uses worker pool to limit concurrency and avoid renewal storms;
-// - Renewal calls support per-call timeout (options.RenewalConfig.CallTimeout);
-// - Statistics are maintained through atomic variables to avoid high-frequency locking;
-// - All Script.Run calls immediately cancel the corresponding context to prevent resource leaks.
+// globalLockManager renews all auto-renew locks from one background goroutine.
+// Design notes:
+//   - a bounded worker pool caps concurrency so renewals never storm Redis;
+//   - each renewal call may carry a per-call timeout (RenewalConfig.CallTimeout);
+//   - stats use atomics to avoid lock contention on the hot path.
 var globalLockManager = &lockManager{
 	locks: make(map[string]*RedisLock),
 }
 
-// Global callback instance
 var globalCallback LockCallback = NoOpCallback{}
 var globalCallbackMu sync.RWMutex
 
-// SetCallback sets the global callback
+// SetCallback installs the process-wide lock-event callback; nil resets to no-op.
 func SetCallback(callback LockCallback) {
 	if callback == nil {
 		callback = NoOpCallback{}
@@ -99,7 +97,6 @@ func (lm *lockManager) startRenewalService(options LockOptions) {
 	}
 	lm.renewCtx, lm.renewCancel = context.WithCancel(context.Background())
 	lm.running = true
-	// Initialize worker pool to limit concurrent goroutine count, preventing resource contention due to concentrated renewal
 	workerPoolSize := options.WorkerPoolSize
 	if workerPoolSize <= 0 {
 		workerPoolSize = DefaultLockOptions.WorkerPoolSize
@@ -157,18 +154,17 @@ func (lm *lockManager) stopRenewalService() {
 func (lm *lockManager) processRenewals(options LockOptions) {
 	lm.mutex.RLock()
 
-	// Pre-allocate slice capacity to reduce memory allocation
 	locksToRenew := make([]*RedisLock, 0, len(lm.locks))
 
 	for _, lock := range lm.locks {
-		// Read lock snapshots (expiresAt/expiration/threshold) to avoid data race
+		// Snapshot under the lock's mutex to avoid racing the holder/renewal.
 		lock.mutex.Lock()
 		expiresAtSnap := lock.expiresAt
 		expirationSnap := lock.expiration
 		thresholdSnap := lock.renewalThreshold
 		lock.mutex.Unlock()
 
-		// Only process locks that need renewal (based on snapshot), threshold = expiration * threshold
+		// Renew once the remaining TTL drops below expiration*threshold.
 		thresholdDur := time.Duration(float64(expirationSnap) * thresholdSnap)
 		if time.Until(expiresAtSnap) <= thresholdDur {
 			locksToRenew = append(locksToRenew, lock)
@@ -176,7 +172,6 @@ func (lm *lockManager) processRenewals(options LockOptions) {
 	}
 	lm.mutex.RUnlock()
 
-	// Use worker pool to limit concurrency; skip current round when pool is full (accumulate SkippedRenewals)
 	for _, lock := range locksToRenew {
 		select {
 		case <-lm.renewCtx.Done():
@@ -196,14 +191,15 @@ func (lm *lockManager) processRenewals(options LockOptions) {
 				lm.renewLockWithRetry(l, options)
 			}(lock)
 		default:
-			// Worker pool is full, skip this round to avoid blocking main loop
+			// Pool saturated: skip this lock this round rather than block the loop.
 			atomic.AddInt64(&lm.stats.SkippedRenewals, 1)
 			incSkippedRenewal()
 		}
 	}
 }
 
-// renewLockWithRetry lock renewal with retry
+// renewLockWithRetry renews a lock with exponential backoff; on terminal failure
+// it drops the lock from the manager (the key then expires naturally in Redis).
 func (lm *lockManager) renewLockWithRetry(lock *RedisLock, options LockOptions) {
 	config := options.RenewalConfig
 	maxRetries := config.MaxRetries
@@ -212,7 +208,6 @@ func (lm *lockManager) renewLockWithRetry(lock *RedisLock, options LockOptions) 
 	}
 
 	for i := 0; i < maxRetries; i++ {
-		// Set timeout for single renewal call (if configured), cancel immediately after Run to release resources
 		ctx := lm.renewCtx
 		var cancel context.CancelFunc
 		if to := config.CallTimeout; to > 0 {
