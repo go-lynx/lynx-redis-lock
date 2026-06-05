@@ -2,11 +2,11 @@ package redislock
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/go-lynx/lynx/log"
-	"github.com/go-lynx/lynx/pkg/timex"
 )
 
 // Lock acquires a distributed lock for the specified key and executes the callback function, automatically releasing the lock after execution.
@@ -157,6 +157,7 @@ func NewLock(ctx context.Context, key string, options LockOptions) (*RedisLock, 
 		ownerKey:         ownerKey,
 		countKey:         countKey,
 		tokenKey:         tokenKey,
+		tokenTTL:         options.TokenTTL,
 	}
 	return lock, nil
 }
@@ -173,152 +174,67 @@ func LockWithRetry(ctx context.Context, key string, expiration time.Duration, fn
 
 // LockWithOptions uses complete configuration options to acquire lock and execute callback function.
 // Key behaviors:
-// - Script calls can configure per-call timeout (options.ScriptCallTimeout). When set, cancel immediately after each call.
+// - Delegates acquisition and retry to lock.AcquireWithRetry, which calls Acquire once per attempt.
 // - After successful acquisition, if renewal is enabled, register in global manager and start renewal service.
-// - Release lock via defer before function returns. Release and status check (IsLocked) both use short timeout context to avoid blocking caller.
-// - Unified partial release semantics: release script passes TTL=0 to not refresh TTL, only reduce count.
+// - Release is performed via defer on an independent short-timeout context so a cancelled business ctx
+//   cannot block best-effort release.  Release.go already calls removeManagedLock on full release, so
+//   no extra IsLocked round-trip is needed.
 // Errors:
-// - Acquisition failures due to contention will trigger OnLockAcquireFailed callback and decide whether to continue based on retry strategy.
+// - Acquisition failures due to contention trigger OnLockAcquireFailed callback inside Acquire and are
+//   subject to the retry strategy; other errors are returned immediately.
 func LockWithOptions(ctx context.Context, key string, options LockOptions, fn func() error) (retErr error) {
-	options = normalizeLockOptions(options)
 	if fn == nil {
 		return ErrLockFnRequired
 	}
-	if err := ValidateKey(key); err != nil {
-		return newLockError(ErrCodeInvalidOptions, "invalid lock key", err)
-	}
-	if err := options.Validate(); err != nil {
-		return newLockError(ErrCodeInvalidOptions, "invalid lock options", err)
-	}
-	provider, err := resolveRedisProvider()
+	options = normalizeLockOptions(options)
+
+	lock, err := NewLock(ctx, key, options)
 	if err != nil {
 		return err
 	}
-	value := generateLockValue()
-	ownerKey, countKey := buildLockKeys(key)
-	tokenKey := buildTokenKey(key)
-	lock := &RedisLock{
-		provider:         provider,
-		key:              key,
-		value:            value,
-		expiration:       options.Expiration,
-		renewalThreshold: options.RenewalThreshold,
-		ownerKey:         ownerKey,
-		countKey:         countKey,
-		tokenKey:         tokenKey,
-	}
-	// Try to acquire lock; track total wait time for the wait_duration_seconds metric.
+
 	waitStart := time.Now()
-	for retries := 0; ; retries++ {
-		if options.RetryStrategy.MaxRetries > 0 && retries >= options.RetryStrategy.MaxRetries {
+	if acquireErr := lock.AcquireWithRetry(ctx, options.RetryStrategy); acquireErr != nil {
+		switch {
+		case errors.Is(acquireErr, ErrMaxRetriesExceeded), ctx.Err() != nil:
 			observeWaitDuration("timeout", time.Since(waitStart))
-			return ErrMaxRetriesExceeded
-		}
-		if retries > 0 {
-			// Jitter the delay so contending acquirers don't retry in lockstep.
-			delay := timex.JitterAround(options.RetryStrategy.RetryDelay, 0.5)
-			if !waitForContextDelay(ctx, delay) {
-				observeWaitDuration("timeout", time.Since(waitStart))
-				return ctx.Err()
-			}
-		}
-		runCtx := ctx
-		var cancel context.CancelFunc
-		if to := options.ScriptCallTimeout; to > 0 {
-			runCtx, cancel = context.WithTimeout(ctx, to)
-		}
-		client, err := lock.currentClient(runCtx)
-		if err != nil {
-			if cancel != nil {
-				cancel()
-			}
+		case errors.Is(acquireErr, ErrLockAcquireConflict):
+			observeWaitDuration("conflict", time.Since(waitStart))
+		default:
 			observeWaitDuration("error", time.Since(waitStart))
-			return err
 		}
+		return acquireErr
+	}
+	observeWaitDuration("success", time.Since(waitStart))
+
+	if options.RenewalEnabled {
+		lock.EnableAutoRenew(options)
+	}
+
+	defer func() {
+		// Use an independent context so a cancelled business ctx cannot block best-effort release.
+		to := options.ScriptCallTimeout
+		if to <= 0 {
+			to = DefaultLockOptions.ScriptCallTimeout
+		}
+		rctx, cancel := cleanupContext(to)
 		start := time.Now()
-		result, err := lockScript.Run(runCtx, client, []string{lock.ownerKey, lock.countKey},
-			lock.value, lock.expiration.Milliseconds()).Result()
+		if releaseErr := lock.Release(rctx); releaseErr != nil {
+			log.ErrorCtx(ctx, "failed to release redis lock", "error", releaseErr)
+			if retErr == nil {
+				retErr = releaseErr
+			}
+		}
 		if cancel != nil {
 			cancel()
 		}
-		observeScriptLatency("acquire", time.Since(start))
-		if err != nil {
-			incAcquire("error")
-			observeWaitDuration("error", time.Since(waitStart))
-			return fmt.Errorf("lock script execution failed: %w", err)
-		}
-		n, ok := result.(int64)
-		if !ok {
-			observeWaitDuration("error", time.Since(waitStart))
-			return fmt.Errorf("unknown lock result type: %T", result)
-		}
-		if n > 0 {
-			observeWaitDuration("success", time.Since(waitStart))
-			// Single timestamp under mutex to avoid racing the renewal goroutine.
-			now := time.Now()
-			lock.mutex.Lock()
-			lock.expiresAt = now.Add(lock.expiration)
-			lock.acquiredAt = now
-			lock.mutex.Unlock()
-			incAcquire("success")
-			currentCallback().OnLockAcquired(key, lock.expiration)
-			if options.RenewalEnabled {
-				addManagedLock(lock)
-				globalLockManager.startRenewalService(options)
-			}
-			inManager := options.RenewalEnabled
-			defer func() {
-				// Release on an independent short-timeout context so a cancelled
-				// business ctx cannot block best-effort release.
-				to := options.ScriptCallTimeout
-				if to <= 0 {
-					to = DefaultLockOptions.ScriptCallTimeout
-				}
-				rctx, cancel := cleanupContext(to)
-				start := time.Now()
-				if releaseErr := lock.Release(rctx); releaseErr != nil {
-					log.ErrorCtx(ctx, "failed to release redis lock", "error", releaseErr)
-					if retErr == nil {
-						retErr = releaseErr
-					}
-					if cancel != nil {
-						cancel()
-					}
-					return
-				}
-				if cancel != nil {
-					cancel()
-				}
-				observeScriptLatency("unlock", time.Since(start))
-				// Only drop from the manager once fully released; a reentrant
-				// partial release must keep being renewed.
-				if inManager {
-					cctx, ccancel := cleanupContext(to)
-					stillHeld, checkErr := lock.IsLocked(cctx)
-					if ccancel != nil {
-						ccancel()
-					}
-					if checkErr != nil {
-						// On an uncertain check, keep it managed so renewal isn't lost.
-						log.ErrorCtx(ctx, "failed to check lock held after release", "error", checkErr)
-						return
-					}
-					if !stillHeld {
-						removeManagedLock(lock)
-					}
-				}
-			}()
-			retErr = fn()
-			return retErr
-		}
-		incAcquire("conflict")
-		currentCallback().OnLockAcquireFailed(key, ErrLockAcquireConflict)
-		if options.RetryStrategy.MaxRetries == 0 {
-			observeWaitDuration("conflict", time.Since(waitStart))
-			return ErrLockAcquireConflict
-		}
-		continue
-	}
+		observeScriptLatency("unlock", time.Since(start))
+		// Release already calls removeManagedLock on full release (case 1).
+		// On partial release (reentrant, case 2) the lock stays in the manager for continued renewal.
+	}()
+
+	retErr = fn()
+	return retErr
 }
 
 func cleanupContext(timeout time.Duration) (context.Context, context.CancelFunc) {

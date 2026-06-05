@@ -105,28 +105,54 @@ func (lm *lockManager) startRenewalService(options LockOptions) {
 	lm.mutex.Unlock()
 
 	go func() {
+		// Mark the service as stopped when this goroutine exits (normal shutdown or fatal error).
 		defer func() {
-			if r := recover(); r != nil {
-				log.ErrorCtx(context.Background(), "panic in renewal service goroutine", "recover", r)
-				// Mark the service as stopped so it can be restarted on the next lock acquisition.
-				lm.mutex.Lock()
-				lm.running = false
-				lm.mutex.Unlock()
-			}
+			lm.mutex.Lock()
+			lm.running = false
+			lm.mutex.Unlock()
 		}()
+
+		// Capture the context for this service instance so restarts after a panic still
+		// respect the same cancel signal.
+		lm.mutex.RLock()
+		renewCtx := lm.renewCtx
+		lm.mutex.RUnlock()
+
 		checkInterval := options.RenewalConfig.CheckInterval
 		if checkInterval <= 0 {
 			checkInterval = DefaultRenewalConfig.CheckInterval
 		}
-		ticker := time.NewTicker(checkInterval)
-		defer ticker.Stop()
 
 		for {
+			// Run one ticker epoch inside a nested closure so that a panic can be
+			// recovered without killing the goroutine; the outer loop then restarts.
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						log.ErrorCtx(context.Background(), "panic in renewal service goroutine", "recover", r)
+					}
+				}()
+				ticker := time.NewTicker(checkInterval)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ticker.C:
+						lm.processRenewals(options)
+					case <-renewCtx.Done():
+						return
+					}
+				}
+			}()
+
+			// Inner function returned: either the context was cancelled (normal stop)
+			// or a panic was recovered.
 			select {
-			case <-ticker.C:
-				lm.processRenewals(options)
-			case <-lm.renewCtx.Done():
-				return
+			case <-renewCtx.Done():
+				return // clean shutdown
+			default:
+				// Panic was recovered; back off briefly then restart the ticker loop.
+				log.ErrorCtx(context.Background(), "renewal service restarting after panic recovery")
+				waitForContextDelay(renewCtx, 200*time.Millisecond)
 			}
 		}
 	}()
@@ -360,28 +386,32 @@ func GetStats() map[string]int64 {
 	return m
 }
 
-// Shutdown gracefully shuts down the lock manager
+// Shutdown gracefully shuts down the lock manager.
+// It stops the renewal service and polls until all active locks are released or the
+// context is cancelled.  Callers control the deadline via ctx — e.g.:
+//
+//	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+//	defer cancel()
+//	_ = redislock.Shutdown(ctx)
 func Shutdown(ctx context.Context) error {
 	globalLockManager.stopRenewalService()
 
-	// Wait for all locks to be released or timeout.
-	// Use a timer (not time.After) so we can stop it and avoid a goroutine leak.
-	timer := time.NewTimer(10 * time.Second)
-	defer timer.Stop()
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-timer.C:
-			return fmt.Errorf("shutdown timeout, %d locks still active",
-				atomic.LoadInt64(&globalLockManager.stats.ActiveLocks))
 		case <-ticker.C:
 			if atomic.LoadInt64(&globalLockManager.stats.ActiveLocks) == 0 {
 				return nil
 			}
 		case <-ctx.Done():
-			return ctx.Err()
+			active := atomic.LoadInt64(&globalLockManager.stats.ActiveLocks)
+			if active == 0 {
+				return nil
+			}
+			return fmt.Errorf("shutdown cancelled with %d locks still active: %w",
+				active, ctx.Err())
 		}
 	}
 }

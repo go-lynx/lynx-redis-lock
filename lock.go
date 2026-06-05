@@ -10,6 +10,26 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// parseLockScriptResult parses the {count, token} array returned by lockLua.
+func parseLockScriptResult(result any) (count, token int64, err error) {
+	arr, ok := result.([]any)
+	if !ok {
+		return 0, 0, fmt.Errorf("unexpected lock result type: %T", result)
+	}
+	if len(arr) < 2 {
+		return 0, 0, fmt.Errorf("unexpected lock result length: %d", len(arr))
+	}
+	count, ok = arr[0].(int64)
+	if !ok {
+		return 0, 0, fmt.Errorf("unexpected lock count type: %T", arr[0])
+	}
+	token, ok = arr[1].(int64)
+	if !ok {
+		return 0, 0, fmt.Errorf("unexpected lock token type: %T", arr[1])
+	}
+	return count, token, nil
+}
+
 func (rl *RedisLock) currentClient(ctx context.Context) (redis.UniversalClient, error) {
 	if rl == nil {
 		return nil, fmt.Errorf("redis lock is nil")
@@ -206,9 +226,10 @@ func (rl *RedisLock) IsLocked(ctx context.Context) (bool, error) {
 	return value == rl.value, nil
 }
 
-// Acquire attempts to acquire (or reenter) the lock based on the current RedisLock instance
-// If called again on the same instance, the Lua script will treat it as reentrant and renew
-// because the value remains unchanged
+// Acquire attempts to acquire (or reenter) the lock based on the current RedisLock instance.
+// If called again on the same instance, the Lua script treats it as reentrant and renews the TTL
+// because the value remains unchanged.  The fencing token is incremented atomically inside the
+// script on first acquisition; no separate Redis round-trip is needed.
 func (rl *RedisLock) Acquire(ctx context.Context) error {
 	client, err := rl.currentClient(ctx)
 	if err != nil {
@@ -220,55 +241,40 @@ func (rl *RedisLock) Acquire(ctx context.Context) error {
 	if to := DefaultLockOptions.ScriptCallTimeout; to > 0 {
 		runCtx, cancel = context.WithTimeout(ctx, to)
 	}
+	// Fall back to the default TokenTTL if the instance was constructed without one
+	// (e.g., in tests that build RedisLock directly rather than via NewLock).
+	tokenTTL := rl.tokenTTL
+	if tokenTTL <= 0 {
+		tokenTTL = DefaultLockOptions.TokenTTL
+	}
 	start := time.Now()
-	result, err := lockScript.Run(runCtx, client, []string{rl.ownerKey, rl.countKey}, rl.value, rl.expiration.Milliseconds()).Result()
+	result, err := lockScript.Run(runCtx, client,
+		[]string{rl.ownerKey, rl.countKey, rl.tokenKey},
+		rl.value, rl.expiration.Milliseconds(), tokenTTL.Milliseconds()).Result()
 	if cancel != nil {
 		cancel()
 	}
 	observeScriptLatency("acquire", time.Since(start))
 	if err != nil {
 		incAcquire("error")
+		currentCallback().OnLockAcquireFailed(rl.key, err)
 		return fmt.Errorf("lock script execution failed: %w", err)
 	}
 
-	n, ok := result.(int64)
-	if !ok {
+	n, token, parseErr := parseLockScriptResult(result)
+	if parseErr != nil {
 		incAcquire("error")
-		return fmt.Errorf("unknown lock result type: %T", result)
+		return parseErr
 	}
 	if n > 0 {
 		now := time.Now()
 		rl.mutex.Lock()
 		rl.acquiredAt = now
 		rl.expiresAt = now.Add(rl.expiration)
-		rl.mutex.Unlock()
-		// If this is the first acquisition (non-reentrant), generate and record fencing token
-		if n == 1 {
-			// A single command is sufficient since no other holder can exist while holding the lock
-			// Optional timeout
-			tctx := ctx
-			var tcancel context.CancelFunc
-			if to := DefaultLockOptions.ScriptCallTimeout; to > 0 {
-				tctx, tcancel = context.WithTimeout(ctx, to)
-			}
-			token, err := client.Incr(tctx, rl.tokenKey).Result()
-			if tcancel != nil {
-				tcancel()
-			}
-			if err != nil {
-				incAcquire("error")
-				releaseCtx, releaseCancel := cleanupContext(DefaultLockOptions.ScriptCallTimeout)
-				releaseErr := rl.Release(releaseCtx)
-				releaseCancel()
-				if releaseErr != nil {
-					return fmt.Errorf("fencing token generation failed: %w; best-effort release failed: %v", err, releaseErr)
-				}
-				return fmt.Errorf("fencing token generation failed: %w", err)
-			}
-			rl.mutex.Lock()
+		if token > 0 { // first acquisition: script returned the new fencing token
 			rl.token = token
-			rl.mutex.Unlock()
 		}
+		rl.mutex.Unlock()
 		incAcquire("success")
 		currentCallback().OnLockAcquired(rl.key, rl.expiration)
 		return nil

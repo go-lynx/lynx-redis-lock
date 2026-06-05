@@ -42,6 +42,7 @@ func newTestLock(t *testing.T, p *fakeRedisProvider, key string, ttl time.Durati
 		ownerKey:         ownerKey,
 		countKey:         countKey,
 		tokenKey:         tokenKey,
+		tokenTTL:         DefaultLockOptions.TokenTTL,
 	}
 }
 

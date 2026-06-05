@@ -19,6 +19,10 @@ type LockOptions struct {
 	RenewalConfig    RenewalConfig // Renewal configuration
 	// ScriptCallTimeout timeout control for single script call (acquire/release). 0 means no separate timeout.
 	ScriptCallTimeout time.Duration
+	// TokenTTL is the TTL applied to the fencing-token counter key in Redis.
+	// The counter must outlive individual lock sessions to keep tokens monotonically increasing.
+	// Defaults to 7 days. Set to 0 to use the default.
+	TokenTTL time.Duration
 }
 
 // Validate validates the lock options (expiration, renewal threshold, worker pool size, retry strategy).
@@ -33,6 +37,10 @@ func (lo *LockOptions) Validate() error {
 
 	if lo.WorkerPoolSize < 0 {
 		return fmt.Errorf("worker pool size must be non-negative, got %d", lo.WorkerPoolSize)
+	}
+
+	if lo.TokenTTL < 0 {
+		return fmt.Errorf("token TTL must be non-negative, got %v", lo.TokenTTL)
 	}
 
 	return lo.RetryStrategy.Validate()
@@ -59,6 +67,9 @@ func normalizeLockOptions(options LockOptions) LockOptions {
 	}
 	if options.RenewalConfig.CallTimeout == 0 {
 		options.RenewalConfig.CallTimeout = DefaultLockOptions.RenewalConfig.CallTimeout
+	}
+	if options.TokenTTL == 0 {
+		options.TokenTTL = DefaultLockOptions.TokenTTL
 	}
 	return options
 }
@@ -152,9 +163,10 @@ type RedisLock struct {
 	// Two keys actually used in Redis (using same hash tag to ensure same slot in cluster)
 	ownerKey string // Key storing holder identifier
 	countKey string // Key storing reentry count
-	// fencing token key and most recently acquired token value
-	// Note: token is only incremented and recorded on first acquisition (non-reentrant).
+	// fencing token key, its TTL, and the most recently acquired token value.
+	// token is set atomically inside lockLua on first (non-reentrant) acquisition.
 	tokenKey string
+	tokenTTL time.Duration // TTL applied to tokenKey; keeps counter bounded without losing monotonicity
 	token    int64
 }
 
@@ -215,6 +227,9 @@ func init() {
 		RenewalConfig:  DefaultRenewalConfig,
 		// Single timeout for acquire/release scripts, slightly higher than Redis P99
 		ScriptCallTimeout: 600 * time.Millisecond,
+		// Token key survives 7 days of inactivity; long enough to preserve monotonicity across restarts,
+		// short enough to avoid unbounded accumulation for ephemeral business keys.
+		TokenTTL: 7 * 24 * time.Hour,
 	}
 }
 
